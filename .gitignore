@@ -1,1 +1,4 @@
-__pycache__/,*.pyc,printers.json,.superpowers/
+__pycache__/
+*.pyc
+printers.json
+.superpowers/
