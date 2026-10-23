@@ -327,3 +327,185 @@ def upload_file(
     finally:
         if own_session:
             session.close()
+
+
+@dataclass(frozen=True)
+class PrinterStatusEvent:
+    printer_key: str
+    text: str
+
+
+@dataclass(frozen=True)
+class FileProgressEvent:
+    printer_key: str
+    file_name: str
+    file_index: int
+    file_total: int
+    bytes_done: int
+    bytes_total: int
+    speed_bps: float
+
+
+@dataclass(frozen=True)
+class FileResultEvent:
+    printer_key: str
+    file_name: str
+    ok: bool
+    message: str
+
+
+@dataclass(frozen=True)
+class OverallEvent:
+    printers_done: int
+    printers_total: int
+    files_processed: int
+    files_total: int
+    aggregate_speed: float
+
+
+@dataclass(frozen=True)
+class FinishedEvent:
+    ok: int
+    failed: int
+    cancelled: bool
+
+
+class BatchSender:
+    def __init__(
+        self,
+        printers: Sequence[Printer],
+        files: Sequence[Path],
+        emit: Callable[[object], None],
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        self.printers = list(printers)
+        self.files = [Path(file_path) for file_path in files]
+        self.emit = emit
+        self.cancel_event = cancel_event or threading.Event()
+        self._lock = threading.Lock()
+        self._printers_done = 0
+        self._files_processed = 0
+        self._ok = 0
+        self._failed = 0
+        self._speeds: dict[str, float] = {printer.key: 0.0 for printer in self.printers}
+        self._thread: threading.Thread | None = None
+
+    @property
+    def files_total(self) -> int:
+        return len(self.files) * len(self.printers)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="batch-sender", daemon=True)
+        self._thread.start()
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self._emit_overall()
+
+    def _run(self) -> None:
+        with ThreadPoolExecutor(max_workers=max(1, len(self.printers))) as pool:
+            futures = [pool.submit(self._run_printer, printer) for printer in self.printers]
+            for future in as_completed(futures):
+                future.result()
+        self._emit_overall()
+        with self._lock:
+            event = FinishedEvent(
+                ok=self._ok,
+                failed=self._failed,
+                cancelled=self.cancel_event.is_set(),
+            )
+        self.emit(event)
+
+    def _run_printer(self, printer: Printer) -> None:
+        session = requests.Session()
+        status = "готово"
+        try:
+            for index, file_path in enumerate(self.files, start=1):
+                if self.cancel_event.is_set():
+                    status = "отменено"
+                    break
+                self.emit(PrinterStatusEvent(printer.key, f"отправка {index}/{len(self.files)}"))
+                try:
+                    upload_file(
+                        printer,
+                        file_path,
+                        cancel_event=self.cancel_event,
+                        on_progress=lambda done, speed, current=printer, path=file_path, position=index: self._on_progress(
+                            current, path, position, done, speed
+                        ),
+                        session=session,
+                    )
+                except UploadCancelled:
+                    with self._lock:
+                        self._speeds[printer.key] = 0.0
+                    self.emit(FileResultEvent(printer.key, file_path.name, False, "отменено"))
+                    status = "отменено"
+                    break
+                except UploadError as exc:
+                    self._record(printer, ok=False, failed=True)
+                    self.emit(FileResultEvent(printer.key, file_path.name, False, str(exc)))
+                    status = f"ошибка: {exc}"[:40]
+                    break
+                else:
+                    self._record(printer, ok=True, failed=False)
+                    self.emit(FileResultEvent(printer.key, file_path.name, True, "OK"))
+        finally:
+            session.close()
+            with self._lock:
+                self._printers_done += 1
+                self._speeds[printer.key] = 0.0
+            self.emit(PrinterStatusEvent(printer.key, status))
+            self._emit_overall()
+
+    def _record(self, printer: Printer, *, ok: bool, failed: bool) -> None:
+        with self._lock:
+            self._files_processed += 1
+            if ok:
+                self._ok += 1
+            if failed:
+                self._failed += 1
+            self._speeds[printer.key] = 0.0
+        self._emit_overall()
+
+    def _on_progress(
+        self,
+        printer: Printer,
+        file_path: Path,
+        index: int,
+        done: int,
+        speed: float,
+    ) -> None:
+        total = file_path.stat().st_size
+        with self._lock:
+            self._speeds[printer.key] = speed
+        self.emit(
+            FileProgressEvent(
+                printer_key=printer.key,
+                file_name=file_path.name,
+                file_index=index,
+                file_total=len(self.files),
+                bytes_done=done,
+                bytes_total=total,
+                speed_bps=speed,
+            )
+        )
+        self._emit_overall()
+
+    def _emit_overall(self) -> None:
+        with self._lock:
+            event = OverallEvent(
+                printers_done=self._printers_done,
+                printers_total=len(self.printers),
+                files_processed=self._files_processed,
+                files_total=self.files_total,
+                aggregate_speed=sum(self._speeds.values()),
+            )
+        self.emit(event)

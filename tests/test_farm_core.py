@@ -287,5 +287,88 @@ class ProbeTests(unittest.TestCase):
         self.assertFalse(result[printers[1].key])
 
 
+from farm_core import (
+    BatchSender,
+    FileProgressEvent,
+    FileResultEvent,
+    FinishedEvent,
+    OverallEvent,
+)
+
+
+class BatchTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.files = []
+        for name in ("a.gcode", "b.gcode"):
+            path = self.root / name
+            path.write_text("G1 X0\n" * 100, encoding="utf-8")
+            self.files.append(path)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_batch(self, printers, cancel=None):
+        events = []
+        sender = BatchSender(printers, self.files, events.append, cancel)
+        sender.start()
+        sender.join(10)
+        self.assertFalse(sender.running)
+        return events
+
+    def test_two_printers_two_files(self):
+        servers = [FakeMoonraker().start() for _ in range(2)]
+        for server in servers:
+            self.addCleanup(server.stop)
+        printers = [
+            Printer(f"p{index}", "127.0.0.1", server.port)
+            for index, server in enumerate(servers)
+        ]
+        events = self.run_batch(printers)
+        results = [event for event in events if isinstance(event, FileResultEvent)]
+        self.assertEqual(len(results), 4)
+        self.assertTrue(all(event.ok for event in results))
+        self.assertEqual([server.post_count() for server in servers], [2, 2])
+        finished = [event for event in events if isinstance(event, FinishedEvent)][-1]
+        self.assertEqual((finished.ok, finished.failed, finished.cancelled), (4, 0, False))
+        overall = [event for event in events if isinstance(event, OverallEvent)][-1]
+        self.assertEqual((overall.printers_done, overall.printers_total), (2, 2))
+        self.assertEqual((overall.files_processed, overall.files_total), (4, 4))
+        self.assertTrue(any(isinstance(event, FileProgressEvent) for event in events))
+
+    def test_failure_isolation(self):
+        bad = FakeMoonraker(status=500).start()
+        good = FakeMoonraker().start()
+        self.addCleanup(bad.stop)
+        self.addCleanup(good.stop)
+        printers = [
+            Printer("bad", "127.0.0.1", bad.port),
+            Printer("good", "127.0.0.1", good.port),
+        ]
+        events = self.run_batch(printers)
+        results = [event for event in events if isinstance(event, FileResultEvent)]
+        self.assertEqual(len(results), 3)
+        self.assertEqual(sum(1 for event in results if event.ok), 2)
+        self.assertEqual(sum(1 for event in results if not event.ok), 1)
+        self.assertEqual(bad.post_count(), 1)
+        self.assertEqual(good.post_count(), 2)
+        finished = [event for event in events if isinstance(event, FinishedEvent)][-1]
+        self.assertEqual((finished.ok, finished.failed), (2, 1))
+        overall = [event for event in events if isinstance(event, OverallEvent)][-1]
+        self.assertEqual((overall.printers_done, overall.files_processed), (2, 3))
+
+    def test_cancel_before_start(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        cancel = threading.Event()
+        cancel.set()
+        events = self.run_batch([Printer("p", "127.0.0.1", server.port)], cancel)
+        self.assertEqual(server.post_count(), 0)
+        finished = [event for event in events if isinstance(event, FinishedEvent)][-1]
+        self.assertTrue(finished.cancelled)
+        self.assertEqual((finished.ok, finished.failed), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
