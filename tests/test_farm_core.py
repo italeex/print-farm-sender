@@ -97,5 +97,195 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("не найден", validate_files([self.root / "missing.gcode"]))
 
 
+import socket
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from farm_core import (
+    ProgressFile,
+    UploadCancelled,
+    UploadError,
+    probe_many,
+    probe_printer,
+    upload_file,
+)
+
+
+class FakeMoonraker:
+    def __init__(self, status=201, delay=0.0):
+        self.status = status
+        self.delay = delay
+        self.requests = []
+        self._lock = threading.Lock()
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path == "/server/info":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"result": {}}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                if self.path != "/server/files/upload":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                if outer.delay:
+                    time.sleep(outer.delay)
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                with outer._lock:
+                    outer.requests.append(
+                        {
+                            "path": self.path,
+                            "content_type": self.headers.get("Content-Type", ""),
+                            "body": body,
+                        }
+                    )
+                self.send_response(outer.status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"result": {"ok": true}}')
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(2)
+
+    def post_count(self):
+        with self._lock:
+            return len(self.requests)
+
+
+class UploadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "part.gcode"
+        self.path.write_text("G1 X1\n", encoding="utf-8")
+        self.server = FakeMoonraker().start()
+        self.addCleanup(self.server.stop)
+        self.printer = Printer("test", "127.0.0.1", self.server.port)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_upload_multipart_and_response(self):
+        events = []
+        result = upload_file(
+            self.printer,
+            self.path,
+            cancel_event=threading.Event(),
+            on_progress=lambda done, speed: events.append((done, speed)),
+        )
+        self.assertEqual(result, {"result": {"ok": True}})
+        self.assertEqual(self.server.post_count(), 1)
+        body = self.server.requests[0]["body"]
+        self.assertIn(b'name="root"', body)
+        self.assertIn(b"gcodes", body)
+        self.assertIn(b'name="file"; filename="part.gcode"', body)
+        self.assertIn(b"G1 X1", body)
+        self.assertEqual(events[-1][0], self.path.stat().st_size)
+
+    def test_upload_reports_progress_and_speed(self):
+        events = []
+        upload_file(
+            self.printer,
+            self.path,
+            cancel_event=threading.Event(),
+            on_progress=lambda done, speed: events.append((done, speed)),
+        )
+        self.assertEqual(events[-1][0], self.path.stat().st_size)
+        self.assertGreater(events[-1][1], 0)
+
+    def test_upload_http_error(self):
+        server = FakeMoonraker(status=500).start()
+        self.addCleanup(server.stop)
+        printer = Printer("bad", "127.0.0.1", server.port)
+        with self.assertRaises(UploadError) as caught:
+            upload_file(
+                printer,
+                self.path,
+                cancel_event=threading.Event(),
+                on_progress=lambda done, speed: None,
+            )
+        self.assertIn("HTTP 500", str(caught.exception))
+
+    def test_upload_cancel_before_read(self):
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(UploadCancelled):
+            upload_file(
+                self.printer,
+                self.path,
+                cancel_event=cancel,
+                on_progress=lambda done, speed: None,
+            )
+
+
+class ProgressFileTests(unittest.TestCase):
+    def test_progress_file_cancel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "big.gcode"
+            path.write_bytes(b"x" * 1024 * 1024)
+            cancel = threading.Event()
+            progress_file = ProgressFile(
+                path,
+                path.stat().st_size,
+                on_progress=lambda done, speed: cancel.set(),
+                cancel_event=cancel,
+            )
+            with self.assertRaises(UploadCancelled):
+                while progress_file.read(8192):
+                    pass
+            progress_file.close()
+
+
+class ProbeTests(unittest.TestCase):
+    def test_probe_online_offline(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        self.assertTrue(
+            probe_printer(Printer("online", "127.0.0.1", server.port), timeout=0.5)
+        )
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        self.assertFalse(probe_printer(Printer("offline", "127.0.0.1", port), timeout=0.2))
+
+    def test_probe_many(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        closed_port = closed.getsockname()[1]
+        closed.close()
+        printers = [
+            Printer("online", "127.0.0.1", server.port),
+            Printer("offline", "127.0.0.1", closed_port),
+        ]
+        result = probe_many(printers, timeout=0.2)
+        self.assertTrue(result[printers[0].key])
+        self.assertFalse(result[printers[1].key])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,9 +4,16 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
 
 DEFAULT_PORT = 7125
+UPLOAD_CHUNK_SIZE = 65536
 INFO_PATH = "/server/info"
 UPLOAD_PATH = "/server/files/upload"
 APP_DIR = Path(__file__).resolve().parent
@@ -190,3 +197,133 @@ def validate_files(files: Sequence[Path]) -> str | None:
     if duplicates:
         return "Одинаковые имена файлов: " + ", ".join(duplicates)
     return None
+
+
+class UploadError(Exception):
+    pass
+
+
+class UploadCancelled(Exception):
+    pass
+
+
+class ProgressFile:
+    def __init__(
+        self,
+        path: Path,
+        total: int,
+        on_progress: Callable[[int, float], None],
+        cancel_event: threading.Event,
+    ) -> None:
+        self._handle = open(path, "rb")
+        self._total = total
+        self._on_progress = on_progress
+        self._cancel_event = cancel_event
+        self._sent = 0
+        self._last_time = time.monotonic()
+        self._last_bytes = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self._cancel_event.is_set() and self._sent < self._total:
+            raise UploadCancelled()
+        remaining = None if size < 0 else size
+        data = bytearray()
+        while remaining is None or remaining > 0:
+            want = remaining if remaining is not None else UPLOAD_CHUNK_SIZE
+            chunk = self._handle.read(min(want, UPLOAD_CHUNK_SIZE))
+            if not chunk:
+                break
+            self._sent += len(chunk)
+            data.extend(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
+            self._emit_progress()
+            if self._cancel_event.is_set() and self._sent < self._total:
+                raise UploadCancelled()
+        return bytes(data)
+
+    def _emit_progress(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_time
+        speed = (self._sent - self._last_bytes) / elapsed if elapsed > 0 else 0.0
+        self._last_time = now
+        self._last_bytes = self._sent
+        self._on_progress(self._sent, speed)
+
+    def tell(self) -> int:
+        return self._sent
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        position = self._handle.seek(offset, whence)
+        self._sent = self._handle.tell()
+        return position
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __enter__(self) -> "ProgressFile":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+
+def probe_printer(printer: Printer, timeout: float = 1.5) -> bool:
+    try:
+        response = requests.get(f"{printer.base_url}{INFO_PATH}", timeout=timeout)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def probe_many(printers: Sequence[Printer], timeout: float = 1.5) -> dict[str, bool]:
+    if not printers:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(printers)) as pool:
+        future_map = {pool.submit(probe_printer, printer, timeout): printer for printer in printers}
+        return {future_map[future].key: future.result() for future in as_completed(future_map)}
+
+
+def upload_file(
+    printer: Printer,
+    file_path: Path,
+    *,
+    cancel_event: threading.Event,
+    on_progress: Callable[[int, float], None],
+    session: requests.Session | None = None,
+) -> dict:
+    file_path = Path(file_path)
+    own_session = session is None
+    session = session or requests.Session()
+    try:
+        total = file_path.stat().st_size
+        with ProgressFile(file_path, total, on_progress, cancel_event) as progress_file:
+            response = session.post(
+                f"{printer.base_url}{UPLOAD_PATH}",
+                data={"root": "gcodes"},
+                files={"file": (file_path.name, progress_file)},
+                timeout=(3, 60),
+            )
+        if response.status_code != 201:
+            raise UploadError(f"HTTP {response.status_code}: {response.text[:200]}")
+        try:
+            return response.json()
+        except ValueError:
+            return {}
+    except UploadCancelled:
+        raise
+    except requests.RequestException as exc:
+        if cancel_event.is_set():
+            raise UploadCancelled() from exc
+        raise UploadError(f"ошибка связи: {exc}") from exc
+    except OSError as exc:
+        raise UploadError(f"файл недоступен: {exc}") from exc
+    finally:
+        if own_session:
+            session.close()
