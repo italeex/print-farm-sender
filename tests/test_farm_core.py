@@ -369,6 +369,46 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(finished.cancelled)
         self.assertEqual((finished.ok, finished.failed), (0, 0))
 
+    def test_worker_crash_still_finishes(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        printers = [
+            Printer("good", "127.0.0.1", server.port),
+            Printer("bad", "127.0.0.1", server.port),
+        ]
+
+        class CrashingSender(BatchSender):
+            def _run_printer(self, printer):
+                if printer.name == "bad":
+                    raise RuntimeError("boom")
+                super()._run_printer(printer)
+
+        events = []
+        sender = CrashingSender(printers, self.files, events.append)
+        sender.start()
+        sender.join(10)
+        self.assertFalse(sender.running)
+        self.assertEqual(server.post_count(), 2)
+        finished = [event for event in events if isinstance(event, FinishedEvent)][-1]
+        self.assertEqual((finished.ok, finished.failed, finished.cancelled), (2, 0, False))
+
+    def test_emit_failure_still_finishes(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        events = []
+
+        def emit(event):
+            if isinstance(event, OverallEvent):
+                raise RuntimeError("ui closed")
+            events.append(event)
+
+        sender = BatchSender([Printer("p", "127.0.0.1", server.port)], self.files, emit)
+        sender.start()
+        sender.join(10)
+        self.assertFalse(sender.running)
+        finished = [event for event in events if isinstance(event, FinishedEvent)][-1]
+        self.assertFalse(finished.cancelled)
+
 
 if __name__ == "__main__":
     unittest.main()

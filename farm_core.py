@@ -411,18 +411,27 @@ class BatchSender:
         self._emit_overall()
 
     def _run(self) -> None:
-        with ThreadPoolExecutor(max_workers=max(1, len(self.printers))) as pool:
-            futures = [pool.submit(self._run_printer, printer) for printer in self.printers]
-            for future in as_completed(futures):
-                future.result()
-        self._emit_overall()
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, len(self.printers))) as pool:
+                futures = [pool.submit(self._run_printer, printer) for printer in self.printers]
+                for future in as_completed(futures):
+                    future.result()
+        except Exception:
+            pass
+        try:
+            self._emit_overall()
+        except Exception:
+            pass
         with self._lock:
             event = FinishedEvent(
                 ok=self._ok,
                 failed=self._failed,
                 cancelled=self.cancel_event.is_set(),
             )
-        self.emit(event)
+        try:
+            self.emit(event)
+        except Exception:
+            pass
 
     def _run_printer(self, printer: Printer) -> None:
         session = requests.Session()
