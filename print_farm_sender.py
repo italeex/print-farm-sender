@@ -225,6 +225,7 @@ class FarmApp(tk.Tk):
         self.event_queue: queue.Queue = queue.Queue()
         self.sender: BatchSender | None = None
         self.cancel_event: threading.Event | None = None
+        self._closing = False
         self.online: dict[str, bool] = {}
         self._build_ui()
         self._render_printers()
@@ -235,11 +236,19 @@ class FarmApp(tk.Tk):
     def _load_config(self) -> AppConfig:
         try:
             return load_config(farm_core.CONFIG_PATH)
-        except ConfigError as exc:
+        except (ConfigError, OSError) as exc:
+            self._preserve_broken_config()
             messagebox.showwarning(
                 "Конфигурация", f"{exc}\n\nЗапуск с пустым списком."
             )
             return AppConfig()
+
+    def _preserve_broken_config(self) -> None:
+        path = Path(farm_core.CONFIG_PATH)
+        try:
+            path.replace(path.with_name(path.name + ".broken"))
+        except OSError:
+            pass
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=8)
@@ -393,10 +402,12 @@ class FarmApp(tk.Tk):
         if error:
             messagebox.showwarning("Отправка", error)
             return
-        for row in self.rows.values():
-            row.bar.configure(value=0)
-            row.speed.configure(text="")
-            row.set_status("ожидание")
+        for printer in printers:
+            row = self.rows.get(printer.key)
+            if row is not None:
+                row.bar.configure(value=0)
+                row.speed.configure(text="")
+                row.set_status("ожидание")
         self.overall_bar.configure(maximum=len(printers), value=0)
         self._update_overall_label(
             0, len(printers), 0, len(self.files) * len(printers), 0.0
@@ -415,15 +426,27 @@ class FarmApp(tk.Tk):
             self._log("Отмена...")
 
     def _drain_events(self):
-        if not self.winfo_exists():
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
             return
         try:
             while True:
-                event = self.event_queue.get_nowait()
-                self._handle_event(event)
-        except queue.Empty:
-            pass
-        self.after(100, self._drain_events)
+                try:
+                    event = self.event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle_event(event)
+                except Exception as exc:
+                    self._log(f"Ошибка обработки события: {exc}")
+        finally:
+            try:
+                if self.winfo_exists():
+                    self.after(100, self._drain_events)
+            except tk.TclError:
+                pass
 
     def _handle_event(self, event):
         if isinstance(event, tuple) and event and event[0] == "probe":
@@ -432,8 +455,13 @@ class FarmApp(tk.Tk):
             row = self.rows.get(event.printer_key)
             if row is not None:
                 row.set_status(event.text)
-                if event.text in ("готово", "ошибка", "отменено") or event.text.startswith("ошибка"):
-                    row.bar.configure(value=0)
+                terminal = (
+                    event.text == "готово"
+                    or event.text == "отменено"
+                    or event.text.startswith("ошибка")
+                )
+                if terminal:
+                    row.bar.configure(value=100 if event.text == "готово" else 0)
                     row.speed.configure(text="")
             self._log(f"{self._printer_name(event.printer_key)}: {event.text}")
         elif isinstance(event, FileProgressEvent):
@@ -466,14 +494,16 @@ class FarmApp(tk.Tk):
             self._finish_send(event)
 
     def _finish_send(self, event: FinishedEvent):
-        self.send_button.configure(state="normal")
-        self.cancel_button.configure(state="disabled")
+        if not self._closing:
+            self.send_button.configure(state="normal")
+            self.cancel_button.configure(state="disabled")
         prefix = "Отменено" if event.cancelled else "Готово"
         text = f"{prefix}. Успешно: {event.ok}, ошибок: {event.failed}"
         self._log(text)
         self.sender = None
         self.cancel_event = None
-        messagebox.showinfo("Отправка", text)
+        if not self._closing:
+            messagebox.showinfo("Отправка", text)
 
     def _update_overall_label(
         self,
@@ -520,11 +550,30 @@ class FarmApp(tk.Tk):
             messagebox.showwarning("Конфигурация", f"Не удалось сохранить: {exc}")
 
     def _on_close(self):
+        if self._closing:
+            return
         if self.sender is not None:
             if not messagebox.askyesno("Выход", "Идёт отправка. Отменить и выйти?"):
                 return
             self.sender.cancel()
             self.sender.join(2.0)
+            if self.sender is not None and self.sender.running:
+                self._closing = True
+                self._log("Останавливаем...")
+                self.send_button.configure(state="disabled")
+                self.cancel_button.configure(state="disabled")
+                self.after(200, self._poll_close)
+                return
+        self._finish_close()
+
+    def _poll_close(self):
+        if self.sender is not None and self.sender.running:
+            self.after(200, self._poll_close)
+            return
+        self._finish_close()
+
+    def _finish_close(self):
+        self._closing = True
         self.config_data.window["width"] = self.winfo_width()
         self.config_data.window["height"] = self.winfo_height()
         self._save_config()

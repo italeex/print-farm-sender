@@ -14,6 +14,7 @@ import requests
 
 DEFAULT_PORT = 7125
 UPLOAD_CHUNK_SIZE = 65536
+PROGRESS_INTERVAL = 0.2
 INFO_PATH = "/server/info"
 UPLOAD_PATH = "/server/files/upload"
 APP_DIR = Path(__file__).resolve().parent
@@ -78,6 +79,8 @@ class AppConfig:
         printers: list[Printer] = []
         seen: set[str] = set()
         for item in raw_printers:
+            if not isinstance(item, dict):
+                continue
             try:
                 printer = Printer.from_dict(item)
             except (KeyError, TypeError, ValueError):
@@ -148,11 +151,14 @@ def load_config(path: Path = CONFIG_PATH, *, seed_base: Path = CREALITY_HOME) ->
     path = Path(path)
     if not path.exists():
         config = AppConfig(printers=seed_printers(seed_base))
-        save_config(config, path)
+        try:
+            save_config(config, path)
+        except OSError as exc:
+            raise ConfigError(f"Не удалось сохранить {path.name}: {exc}") from exc
         return config
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         raise ConfigError(f"Не удалось прочитать {path.name}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{path.name}: ожидался объект JSON")
@@ -162,10 +168,18 @@ def load_config(path: Path = CONFIG_PATH, *, seed_base: Path = CREALITY_HOME) ->
 def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    temp_path = path.with_name(path.name + ".tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(config.to_dict(), handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
 
 
 def duplicate_basenames(files: Iterable[Path]) -> list[str]:
@@ -221,6 +235,7 @@ class ProgressFile:
         self._cancel_event = cancel_event
         self._sent = 0
         self._last_time = time.monotonic()
+        self._last_emit_time: float | None = None
         self._last_bytes = 0
 
     def read(self, size: int = -1) -> bytes:
@@ -244,9 +259,17 @@ class ProgressFile:
 
     def _emit_progress(self) -> None:
         now = time.monotonic()
+        final = self._sent >= self._total
+        if (
+            not final
+            and self._last_emit_time is not None
+            and now - self._last_emit_time < PROGRESS_INTERVAL
+        ):
+            return
         elapsed = now - self._last_time
         speed = (self._sent - self._last_bytes) / elapsed if elapsed > 0 else 0.0
         self._last_time = now
+        self._last_emit_time = now
         self._last_bytes = self._sent
         self._on_progress(self._sent, speed)
 
@@ -443,12 +466,16 @@ class BatchSender:
                     break
                 self.emit(PrinterStatusEvent(printer.key, f"отправка {index}/{len(self.files)}"))
                 try:
+                    total = file_path.stat().st_size
+                except OSError:
+                    total = 0
+                try:
                     upload_file(
                         printer,
                         file_path,
                         cancel_event=self.cancel_event,
-                        on_progress=lambda done, speed, current=printer, path=file_path, position=index: self._on_progress(
-                            current, path, position, done, speed
+                        on_progress=lambda done, speed, current=printer, path=file_path, position=index, size=total: self._on_progress(
+                            current, path, position, done, speed, size
                         ),
                         session=session,
                     )
@@ -491,8 +518,8 @@ class BatchSender:
         index: int,
         done: int,
         speed: float,
+        total: int,
     ) -> None:
-        total = file_path.stat().st_size
         with self._lock:
             self._speeds[printer.key] = speed
         self.emit(

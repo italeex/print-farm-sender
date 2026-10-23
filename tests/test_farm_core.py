@@ -79,6 +79,32 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config(self.config_path)
 
+    def test_load_config_skips_malformed_printers(self):
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "printers": [
+                        None,
+                        "192.168.1.5",
+                        {"host": "192.168.1.6", "name": "ok"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = load_config(self.config_path)
+        self.assertEqual([printer.host for printer in config.printers], ["192.168.1.6"])
+        self.assertEqual(config.printers[0].name, "ok")
+
+    def test_load_config_cp1251_raises(self):
+        self.config_path.write_bytes(
+            '{"printers": [{"host": "10.0.0.1"}], "last_dir": "C:\\\\папка"}'.encode(
+                "cp1251"
+            )
+        )
+        with self.assertRaises(ConfigError):
+            load_config(self.config_path)
+
     def test_duplicate_basenames_case_insensitive(self):
         files = [Path("a/part.gcode"), Path("b/PART.gcode"), Path("c/other.gcode")]
         self.assertEqual(duplicate_basenames(files), ["PART.gcode"])
@@ -214,6 +240,48 @@ class UploadTests(unittest.TestCase):
         )
         self.assertEqual(events[-1][0], self.path.stat().st_size)
         self.assertGreater(events[-1][1], 0)
+
+    def test_upload_large_payload_exact(self):
+        payload = bytes(range(256)) * (128 * 1024 // 256)
+        path = self.root / "big.gcode"
+        path.write_bytes(payload)
+        self.assertGreater(len(payload), farm_core.UPLOAD_CHUNK_SIZE)
+        result = upload_file(
+            self.printer,
+            path,
+            cancel_event=threading.Event(),
+            on_progress=lambda done, speed: None,
+        )
+        self.assertEqual(result, {"result": {"ok": True}})
+        self.assertEqual(self.server.post_count(), 1)
+        request = self.server.requests[0]
+        body = request["body"]
+        boundary = request["content_type"].split("boundary=", 1)[1].strip('"')
+        self.assertTrue(body.endswith(b"--" + boundary.encode() + b"--\r\n"))
+        marker = b'filename="big.gcode"'
+        header_end = body.index(marker) + len(marker)
+        content_start = body.index(b"\r\n\r\n", header_end) + 4
+        content_end = body.index(b"\r\n--" + boundary.encode(), content_start)
+        self.assertEqual(body[content_start:content_end], payload)
+
+    def test_upload_non_ascii_filename(self):
+        name = "деталь 1.gcode"
+        path = self.root / name
+        path.write_text("G1 X2\n", encoding="utf-8")
+        result = upload_file(
+            self.printer,
+            path,
+            cancel_event=threading.Event(),
+            on_progress=lambda done, speed: None,
+        )
+        self.assertEqual(result, {"result": {"ok": True}})
+        body = self.server.requests[0]["body"]
+        expected = ('filename="' + name + '"').encode("utf-8")
+        self.assertIn(expected, body)
+        self.assertNotIn(b"filename*=", body)
+        header_end = body.index(expected) + len(expected)
+        content_start = body.index(b"\r\n\r\n", header_end) + 4
+        self.assertTrue(body[content_start:].startswith(path.read_bytes()))
 
     def test_upload_http_error(self):
         server = FakeMoonraker(status=500).start()
