@@ -28,6 +28,7 @@ const state = {
   printers: [],
   summary: {},
   job: {},
+  config: {},
   selected: new Set(),
   files: [],
   filter: "all",
@@ -48,6 +49,7 @@ let toastsEl = null;
 let connEl = null;
 let connTextEl = null;
 let printerCountEl = null;
+let refreshSecondsEl = null;
 let sendEstimateEl = null;
 let cancelJobEl = null;
 let filesCountEl = null;
@@ -369,11 +371,16 @@ async function fetchState() {
     state.printers = Array.isArray(data.printers) ? data.printers : [];
     state.summary = data.summary || {};
     state.job = data.job || {};
+    state.config = data.config || {};
+    const refreshSeconds = Number(state.config.refresh_seconds);
+    if (Number.isFinite(refreshSeconds) && refreshSeconds > 0) {
+      setText(refreshSecondsEl, refreshSeconds);
+    }
     lastErrorToast = 0;
     setConnection(true);
     noteJobExit();
     render();
-    loadJournal();
+    if (journalPanel && !journalPanel.hidden) loadJournal();
   } catch (error) {
     setConnection(false);
     notifyServerError();
@@ -1147,7 +1154,7 @@ function openFilesModal() {
   if (!modalFiles) return;
   fsSelected = new Set(state.files);
   fsActive = state.files.length ? state.files[0] : "";
-  let start = lastFsPath;
+  let start = lastFsPath || state.config.last_dir || "";
   if (!start && state.files.length) {
     const parent = parentPath(state.files[0]);
     start = parent || "";
@@ -1334,7 +1341,10 @@ async function deletePrinter() {
   if (!printerKeyEl) return;
   const key = printerKeyEl.value.trim();
   if (!key) return;
-  const name = printerNameEl ? printerNameEl.value.trim() || key : key;
+  const known = printerItems.find(function (item) {
+    return item.key === key;
+  });
+  const name = known ? known.name : key;
   const confirmed = await confirmDialog("Удалить принтер «" + name + "»?");
   if (!confirmed) return;
   if (printerDeleteEl) printerDeleteEl.disabled = true;
@@ -1485,6 +1495,7 @@ async function loadJournal() {
         unindexed += 1;
       }
       const item = document.createElement("li");
+      if (index !== null) item.dataset.journalIndex = String(index);
       const stamp = journalTime(entry);
       if (stamp) {
         const time = document.createElement("time");
@@ -1501,6 +1512,13 @@ async function loadJournal() {
     }
     if (payload.cursor !== null && payload.cursor > journalCursor) journalCursor = payload.cursor;
     else if (payload.cursor === null && unindexed) journalCursor += unindexed;
+    while (journalEl.children.length > 200) {
+      const first = journalEl.firstElementChild;
+      if (!first) break;
+      const stale = Number(first.dataset.journalIndex);
+      if (Number.isFinite(stale)) journalIndexes.delete(stale);
+      first.remove();
+    }
     journalCount += added;
     setText(journalCountEl, journalCount);
     if (added && !journalPanel.hidden && atBottom) journalEl.scrollTop = journalEl.scrollHeight;
@@ -1646,6 +1664,7 @@ function init() {
   connEl = document.getElementById("conn");
   connTextEl = document.getElementById("conn-text");
   printerCountEl = document.getElementById("printer-count");
+  refreshSecondsEl = document.getElementById("refresh-seconds");
   sendEstimateEl = document.getElementById("send-estimate");
   cancelJobEl = document.getElementById("cancel-job");
   filesCountEl = document.getElementById("files-count");

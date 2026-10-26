@@ -135,11 +135,22 @@ class PollerTests(unittest.TestCase):
         self.addCleanup(monitor.stop)
         return monitor
 
+    def drain_thumbs(self, monitor, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with monitor._lock:
+                pending = [future for future in monitor._thumb_futures if not future.done()]
+            if not pending:
+                return
+            time.sleep(0.02)
+        self.fail("Превью не загрузилось вовремя")
+
     def test_poll_once_builds_snapshot(self):
         server = FakeMoonraker(thumb=b"\x89PNG\r\n\x1a\nx").start()
         self.addCleanup(server.stop)
         monitor = self.make_monitor(server)
         monitor.poll_once()
+        self.drain_thumbs(monitor)
         snapshot = monitor.snapshot()
         view = snapshot["printers"][0]
         self.assertEqual(view["state"], "printing")
@@ -224,6 +235,7 @@ class PollerTests(unittest.TestCase):
         self.addCleanup(server.stop)
         monitor = self.make_monitor(server)
         monitor.poll_once()
+        self.drain_thumbs(monitor)
         view = monitor.snapshot()["printers"][0]
         self.assertEqual(view["state"], "idle")
         self.assertEqual(view["file"], "part.gcode")
@@ -325,15 +337,81 @@ class PollerTests(unittest.TestCase):
         monitor.stop()
         self.assertFalse(monitor.running)
 
-    def test_thumb_failure_retries_on_next_poll(self):
-        server = FakeMoonraker().start()
+    def test_thumb_transport_error_retries_on_next_poll(self):
+        server = FakeMoonraker(thumb_status=500).start()
         self.addCleanup(server.stop)
         monitor = self.make_monitor(server)
         monitor.poll_once()
+        self.drain_thumbs(monitor)
         self.assertEqual(monitor.snapshot()["printers"][0]["thumb_version"], "")
+        server.thumb_status = 206
         server.thumb = b"\x89PNG\r\n\x1a\nx"
         monitor.refresh()
+        self.drain_thumbs(monitor)
         self.assertTrue(monitor.snapshot()["printers"][0]["thumb_version"])
+
+    def test_missing_thumbnail_fetched_once_per_interval(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        key = monitor._printers[0].key
+        monitor.poll_once()
+        self.drain_thumbs(monitor)
+        self.assertEqual(server.request_count("/server/files/gcodes/"), 1)
+        monitor._next_due[key] = 0
+        monitor.poll_once()
+        self.drain_thumbs(monitor)
+        self.assertEqual(server.request_count("/server/files/gcodes/"), 1)
+
+    def test_objects_failure_keeps_previous_print_data(self):
+        server = FakeMoonraker(thumb=b"\x89PNG\r\n\x1a\nx").start()
+        self.addCleanup(server.stop)
+        clock = FakeClock(50.0)
+        monitor = self.make_monitor(server, clock=clock)
+        key = monitor._printers[0].key
+        monitor.poll_once()
+        self.drain_thumbs(monitor)
+        first = monitor.snapshot()["printers"][0]
+        self.assertEqual(first["state"], "printing")
+        self.assertTrue(first["thumb_version"])
+        server.objects = None
+        monitor._next_due[key] = 0
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "error")
+        self.assertTrue(view["online"])
+        self.assertEqual(view["file"], first["file"])
+        self.assertEqual(view["progress"], first["progress"])
+        self.assertEqual(view["layer"], first["layer"])
+        self.assertEqual(view["thumb_version"], first["thumb_version"])
+        self.assertEqual(view["error"]["label"], "Klipper не отвечает")
+        self.assertEqual(view["error"]["code"], "")
+        self.assertIn("500", view["error"]["detail"])
+
+    def test_objects_failure_before_first_success_has_empty_file(self):
+        server = FakeMoonraker(objects=None).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "error")
+        self.assertTrue(view["online"])
+        self.assertEqual(view["file"], "")
+        self.assertEqual(view["error"]["label"], "Klipper не отвечает")
+
+    def test_objects_failure_with_shutdown_reads_log(self):
+        server = FakeMoonraker(
+            info={"state": "shutdown", "state_message": ""},
+            objects=None,
+            log_tail='!! {"code": "2560", "msg": "MCU lost"}\n',
+        ).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "error")
+        self.assertEqual(view["error"]["code"], "2560")
+        self.assertEqual(view["error"]["detail"], "MCU lost")
 
 
 if __name__ == "__main__":

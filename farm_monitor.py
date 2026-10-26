@@ -8,7 +8,7 @@ import requests
 
 from farm_core import AppConfig, Printer
 from farm_errors import ErrorInfo, parse_error
-from farm_thumbs import ThumbCache, thumbnail_from_http
+from farm_thumbs import ThumbCache, load_thumbnail
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ INFO_TIMEOUT = 2.5
 OBJECTS_TIMEOUT = 2.5
 LOG_TIMEOUT = 3.0
 MAX_WORKERS = 16
+THUMB_WORKERS = 4
 BACKOFF_BASE = 10.0
 BACKOFF_CAP = 60.0
 LOOP_STEP = 0.5
@@ -156,6 +157,9 @@ class FarmMonitor:
         self._stop = threading.Event()
         self._thread = None
         self._pool = None
+        self._thumb_pool = None
+        self._thumb_futures = []
+        self._thumb_pending = set()
         self._local = threading.local()
         self._sessions = []
         self._updated_at = 0.0
@@ -181,8 +185,12 @@ class FarmMonitor:
             self._thread = None
         pool = self._pool
         self._pool = None
+        thumb_pool = self._thumb_pool
+        self._thumb_pool = None
         if pool is not None:
             pool.shutdown(wait=False)
+        if thumb_pool is not None:
+            thumb_pool.shutdown(wait=False)
         with self._lock:
             sessions = self._sessions
             self._sessions = []
@@ -215,6 +223,7 @@ class FarmMonitor:
         now = self._clock()
         with self._lock:
             due = [printer for printer in self._printers if self._next_due.get(printer.key, 0.0) <= now]
+            self._thumb_futures = [future for future in self._thumb_futures if not future.done()]
         if not due:
             return
         pool = self._ensure_pool()
@@ -225,11 +234,14 @@ class FarmMonitor:
             except Exception:
                 LOGGER.exception("Опрос принтера %s завершился ошибкой", printer.name)
                 result = (None, None, "", None, "")
+            filename = ""
             try:
                 with self._lock:
-                    self._apply(printer, result)
+                    filename = self._apply(printer, result)
             except Exception:
                 LOGGER.exception("Не удалось применить результат опроса принтера %s", printer.name)
+            if filename:
+                self._submit_thumb(printer, filename)
         with self._lock:
             self._updated_at = self._clock()
 
@@ -264,6 +276,12 @@ class FarmMonitor:
                 self._pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
             return self._pool
 
+    def _ensure_thumb_pool(self):
+        with self._lock:
+            if self._thumb_pool is None:
+                self._thumb_pool = ThreadPoolExecutor(max_workers=THUMB_WORKERS)
+            return self._thumb_pool
+
     def _session(self):
         session = getattr(self._local, "session", None)
         if session is None:
@@ -282,18 +300,18 @@ class FarmMonitor:
         try:
             status = self._fetch_objects(session, printer)
         except Exception as exc:
-            return info, None, str(exc), None, ""
+            state_name = str(info.get("state") or "")
+            error_info = None
+            if state_name in ("error", "shutdown"):
+                error_info = self._collect_error(session, printer, state_name, str(info.get("state_message") or ""))
+            return info, None, str(exc), error_info, ""
         print_stats = status.get("print_stats") or {}
         state_name = str(info.get("state") or "")
         error_info = None
         if state_name in ("error", "shutdown") or print_stats.get("state") == "error":
             parse_state = state_name if state_name in ("error", "shutdown") else "error"
             error_info = self._collect_error(session, printer, parse_state, str(info.get("state_message") or ""))
-        filename = str(print_stats.get("filename") or "")
-        thumb_version = ""
-        if filename:
-            thumb_version = self._load_thumb(session, printer, filename)
-        return info, status, "", error_info, thumb_version
+        return info, status, "", error_info, ""
 
     def _collect_error(self, session, printer, state_name, state_message):
         try:
@@ -340,19 +358,44 @@ class FarmMonitor:
             raise ValueError("ожидался JSON-объект")
         return payload
 
-    def _load_thumb(self, session, printer, filename):
-        def load():
-            return thumbnail_from_http(session, printer.base_url, filename)
-
+    def _submit_thumb(self, printer, filename) -> None:
         cache_key = (printer.key, filename)
-        self._thumb_cache.get(cache_key, load)
-        return self._thumb_cache.version(cache_key)
+        with self._lock:
+            if cache_key in self._thumb_pending or self._thumb_cache.has(cache_key):
+                return
+            self._thumb_pending.add(cache_key)
+        try:
+            future = self._ensure_thumb_pool().submit(self._load_thumb, printer, filename)
+        except Exception:
+            with self._lock:
+                self._thumb_pending.discard(cache_key)
+            return
+        with self._lock:
+            self._thumb_futures.append(future)
 
-    def _apply(self, printer, result) -> None:
-        info, status, reason, error_info, thumb_version = result
+    def _load_thumb(self, printer, filename) -> None:
+        cache_key = (printer.key, filename)
+        try:
+            session = self._session()
+            data, received = load_thumbnail(session, printer.base_url, filename)
+            if data:
+                self._thumb_cache.put(cache_key, data)
+            elif received:
+                self._thumb_cache.put_negative(cache_key)
+            version = self._thumb_cache.version(cache_key)
+            with self._lock:
+                view = self._views.get(printer.key)
+                if view is not None and view.file == filename and view.thumb_version != version:
+                    self._views[printer.key] = replace(view, thumb_version=version)
+        finally:
+            with self._lock:
+                self._thumb_pending.discard(cache_key)
+
+    def _apply(self, printer, result) -> str:
+        info, status, reason, error_info, _thumb = result
         key = printer.key
         if key not in {item.key for item in self._printers}:
-            return
+            return ""
         now = self._clock()
         previous = self._views.get(key)
         if info is None:
@@ -365,11 +408,29 @@ class FarmMonitor:
             if previous is not None:
                 view = replace(view, last_seen=previous.last_seen, thumb_version=previous.thumb_version)
             self._views[key] = view
-            return
+            return ""
         self._failures[key] = 0
         self._next_due[key] = now + self._interval
-        if status is None and reason:
-            LOGGER.warning("Принтер %s ответил без статуса: %s", printer.name, reason)
+        if status is None:
+            if reason:
+                LOGGER.warning("Принтер %s ответил без статуса: %s", printer.name, reason)
+            error = error_info if error_info is not None else self._last_error.get(key)
+            if error is None:
+                error = ErrorInfo(
+                    code="",
+                    label="Klipper не отвечает",
+                    hint="Проверьте, запущен ли Klipper, и откройте Mainsail.",
+                    detail=reason,
+                )
+            if previous is not None:
+                view = replace(previous, state="error", online=True, error=error, last_seen=now)
+            else:
+                view = build_view(printer, info=info, status=None, now=now, error=error, thumb_version="")
+            self._last_error[key] = error
+            self._views[key] = view
+            return ""
+        filename = str((status.get("print_stats") or {}).get("filename") or "")
+        thumb_version = self._thumb_cache.version((key, filename)) if filename else ""
         error = error_info if error_info is not None else self._last_error.get(key)
         view = build_view(printer, info=info, status=status, now=now, error=error, thumb_version=thumb_version)
         if view.state in ("printing", "idle"):
@@ -379,3 +440,4 @@ class FarmMonitor:
         elif error is not None:
             self._last_error[key] = error
         self._views[key] = view
+        return filename

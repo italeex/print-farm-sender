@@ -87,6 +87,14 @@ class ServerTests(unittest.TestCase):
         response = requests.get(self.url("/../farm_core.py"), timeout=3)
         self.assertIn(response.status_code, (400, 404))
 
+    def test_host_header_rejected(self):
+        response = requests.get(self.url("/api/state"), headers={"Host": "evil.example"}, timeout=3)
+        self.assertEqual(response.status_code, 403)
+
+    def test_host_localhost_allowed(self):
+        response = requests.get(self.url("/api/state"), headers={"Host": f"localhost:{self.port}"}, timeout=3)
+        self.assertEqual(response.status_code, 200)
+
     def test_unknown_path_404(self):
         response = requests.get(self.url("/api/missing"), timeout=3)
         self.assertEqual(response.status_code, 404)
@@ -130,6 +138,16 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(app.config.printers, [])
             self.assertTrue(Path(str(path) + ".broken").exists())
             self.assertFalse(path.exists())
+
+    def test_broken_config_journaled_when_rename_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "printers.json"
+            path.write_text("{", encoding="utf-8")
+            with mock.patch("pathlib.Path.replace", side_effect=OSError("locked")):
+                with self.assertLogs("farm_server", level="ERROR"):
+                    app = FarmApp(config_path=path, start_monitor=False)
+            messages = [entry["message"] for entry in app.journal.snapshot()]
+            self.assertTrue(any("Конфигурация не загружена" in message for message in messages))
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"thumbnail" * 8
@@ -251,6 +269,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("доступ", response.json()["error"])
 
+    def test_fs_rejects_nul_path(self):
+        response = requests.get(self.url("/api/fs?path=%00"), timeout=3)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Некорректный путь", response.json()["error"])
+
     def test_files_thumb(self):
         response = requests.get(self.url("/api/files/thumb?path=" + quote(str(self.gcode))), timeout=3)
         self.assertEqual(response.status_code, 200)
@@ -340,6 +363,36 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         bad_action = requests.post(self.url(f"/api/print/{self.key}/explode"), timeout=3)
         self.assertEqual(bad_action.status_code, 400)
+
+    def test_pause_requires_printing_state(self):
+        self.monitor.view = replace(self.monitor.view, state="idle")
+        response = requests.post(self.url(f"/api/print/{self.key}/pause"), timeout=3)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Пауза", response.json()["error"])
+        self.assertNotIn("/printer/print/pause", self.moonraker.request_paths)
+
+    def test_resume_requires_paused_state(self):
+        response = requests.post(self.url(f"/api/print/{self.key}/resume"), timeout=3)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Продолжение", response.json()["error"])
+        self.assertNotIn("/printer/print/resume", self.moonraker.request_paths)
+
+    def test_cancel_allowed_when_idle_online(self):
+        self.monitor.view = replace(self.monitor.view, state="idle")
+        response = requests.post(self.url(f"/api/print/{self.key}/cancel"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("/printer/print/cancel", self.moonraker.request_paths)
+
+    def test_control_rejected_when_offline(self):
+        self.monitor.view = replace(self.monitor.view, state="offline", online=False)
+        response = requests.post(self.url(f"/api/print/{self.key}/cancel"), timeout=3)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("не в сети", response.json()["error"])
+
+    def test_state_config_includes_last_dir(self):
+        self.app.config.last_dir = self.tmp.name
+        payload = requests.get(self.url("/api/state"), timeout=3).json()
+        self.assertEqual(payload["config"]["last_dir"], self.tmp.name)
 
     def test_send_starts_job(self):
         response = requests.post(self.url("/api/send"), json={"printers": [self.key], "files": [str(self.gcode)]}, timeout=3)

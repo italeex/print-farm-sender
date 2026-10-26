@@ -57,25 +57,29 @@ def thumbnail_from_file(path: Path) -> bytes | None:
         return None
 
 
-def thumbnail_from_http(session, base_url: str, filename: str, *, timeout: float = 5.0) -> bytes | None:
+def load_thumbnail(session, base_url: str, filename: str, *, timeout: float = 5.0) -> tuple[bytes | None, bool]:
     response = None
     try:
         url = f"{base_url}/server/files/gcodes/{quote(filename)}"
         response = session.get(url, headers={"Range": f"bytes=0-{MAX_THUMB_BYTES - 1}"}, timeout=timeout, stream=True)
         if response.status_code not in (200, 206):
-            return None
+            return None, False
         data = response.raw.read(MAX_THUMB_BYTES)
-        return extract_thumbnail(data)
+        return extract_thumbnail(data), True
     except requests.RequestException:
-        return None
+        return None, False
     except Exception:
-        return None
+        return None, False
     finally:
         try:
             if response is not None:
                 response.close()
         except Exception:
             pass
+
+
+def thumbnail_from_http(session, base_url: str, filename: str, *, timeout: float = 5.0) -> bytes | None:
+    return load_thumbnail(session, base_url, filename, timeout=timeout)[0]
 
 
 class ThumbCache:
@@ -112,6 +116,13 @@ class ThumbCache:
             if not entry:
                 return ""
             return entry[0]
+
+    def has(self, key) -> bool:
+        with self._lock:
+            return key in self._store
+
+    def put_negative(self, key) -> None:
+        self.put(key, None)
 
     def get(self, key, loader):
         with self._lock:

@@ -27,10 +27,11 @@ def gcode_with_thumb(payload):
 
 
 class FakeMoonraker:
-    def __init__(self, *, info=None, objects=UNSET, thumb=None, log_tail="", failures=0):
+    def __init__(self, *, info=None, objects=UNSET, thumb=None, thumb_status=206, log_tail="", failures=0):
         self.info = info or {"state": "ready", "state_message": "Printer is ready"}
         self.objects = DEFAULT_STATUS if objects is UNSET else objects
         self.thumb = thumb
+        self.thumb_status = thumb_status
         self.log_tail = log_tail
         self.failures = failures
         self.requests = []
@@ -56,8 +57,8 @@ class FakeMoonraker:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _send_bytes(self, body, content_type):
-                self.send_response(206)
+            def _send_bytes(self, body, content_type, status=206):
+                self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -80,8 +81,11 @@ class FakeMoonraker:
                     self._send_json({"result": {"status": fake.objects}})
                     return
                 if path.startswith("/server/files/gcodes/"):
+                    if fake.thumb_status not in (200, 206):
+                        self.send_error(fake.thumb_status)
+                        return
                     body = gcode_with_thumb(fake.thumb) if fake.thumb else b"G1 X0\n"
-                    self._send_bytes(body, "application/octet-stream")
+                    self._send_bytes(body, "application/octet-stream", fake.thumb_status)
                     return
                 if path == "/server/files/logs/klippy.log":
                     self._send_bytes(fake.log_tail.encode("utf-8"), "text/plain")

@@ -137,6 +137,7 @@ class FarmApp:
         except (ConfigError, OSError) as exc:
             self.config_error = str(exc)
             LOGGER.error("Конфигурация не загружена: %s", exc)
+            self.journal.add(f"Конфигурация не загружена: {exc}", "error")
             self._quarantine_config()
             return AppConfig()
 
@@ -164,6 +165,7 @@ class FarmApp:
             "path": str(self.config_path),
             "printers": len(self.config.printers),
             "refresh_seconds": self.config.refresh_seconds,
+            "last_dir": self.config.last_dir,
             "error": self.config_error,
         }
         return snapshot
@@ -197,6 +199,8 @@ class FarmHandler(BaseHTTPRequestHandler):
     _body_error = None
 
     def do_GET(self) -> None:
+        if not self._guard_host():
+            return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
@@ -228,6 +232,8 @@ class FarmHandler(BaseHTTPRequestHandler):
         self._send_error(404, "Неизвестный адрес")
 
     def do_POST(self) -> None:
+        if not self._guard_host():
+            return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         if not self._guard_origin():
@@ -257,6 +263,8 @@ class FarmHandler(BaseHTTPRequestHandler):
         self._send_error(404, "Неизвестный адрес")
 
     def do_PUT(self) -> None:
+        if not self._guard_host():
+            return
         path = unquote(urlparse(self.path).path)
         if not self._guard_origin():
             return
@@ -267,6 +275,8 @@ class FarmHandler(BaseHTTPRequestHandler):
         self._send_error(404, "Неизвестный адрес")
 
     def do_DELETE(self) -> None:
+        if not self._guard_host():
+            return
         path = unquote(urlparse(self.path).path)
         if not self._guard_origin():
             return
@@ -275,6 +285,15 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._api_printer_delete(path[len("/api/printers/"):])
             return
         self._send_error(404, "Неизвестный адрес")
+
+    def _guard_host(self) -> bool:
+        host = (self.headers.get("Host") or "").strip().lower()
+        port = self.server.server_address[1]
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if host in allowed:
+            return True
+        self._send_error(403, "Недопустимый заголовок Host")
+        return False
 
     def _guard_origin(self) -> bool:
         if self._origin_allowed():
@@ -339,6 +358,9 @@ class FarmHandler(BaseHTTPRequestHandler):
         except PermissionError:
             self._send_error(403, "Нет доступа к папке")
             return
+        except ValueError:
+            self._send_error(400, "Некорректный путь")
+            return
         except OSError:
             self._send_error(404, "Папка не найдена")
             return
@@ -396,6 +418,18 @@ class FarmHandler(BaseHTTPRequestHandler):
         printer = next((item for item in self.app.config.printers if item.key == key), None)
         if printer is None:
             self._send_error(404, "Принтер не найден")
+            return
+        views = self.app.monitor.snapshot().get("printers") or []
+        view = next((item for item in views if item.get("key") == key), None) or {}
+        if not view.get("online"):
+            self._send_error(409, "Принтер не в сети")
+            return
+        current = str(view.get("state") or "")
+        if action == "pause" and current != "printing":
+            self._send_error(409, "Пауза доступна только во время печати")
+            return
+        if action == "resume" and current != "paused":
+            self._send_error(409, "Продолжение доступно только с паузы")
             return
         try:
             print_action(printer, action)
