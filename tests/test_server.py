@@ -254,6 +254,9 @@ class ApiTests(unittest.TestCase):
     def url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
 
+    def printer_url(self, key):
+        return self.url("/api/printers/" + quote(key, safe=""))
+
     def saved_config(self):
         return json.loads(self.config_path.read_text(encoding="utf-8"))
 
@@ -313,6 +316,19 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["paths"], [str(self.gcode.resolve())])
+        self.assertEqual(response.json()["rejected"], 2)
+        self.assertFalse(response.json()["cancelled"])
+
+    def test_fs_browse_reports_cancelled(self):
+        self.browse_result = []
+        response = requests.post(
+            self.url("/api/fs/browse"),
+            json={"initial_dir": self.tmp.name},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["paths"], [])
+        self.assertTrue(response.json()["cancelled"])
 
     def test_fs_browse_rejects_bad_body(self):
         bad_json = requests.post(
@@ -342,6 +358,41 @@ class ApiTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 501)
         self.assertIn("диалог", response.json()["error"])
+        self.assertNotIn("tk недоступен", response.json()["error"])
+
+    def test_fs_browse_single_flight(self):
+        started = threading.Event()
+        release = threading.Event()
+        responses = {}
+
+        def blocking(initial_dir):
+            started.set()
+            release.wait(10)
+            return []
+
+        self.addCleanup(release.set)
+        self.app.browse_files = blocking
+
+        def first_call():
+            responses["first"] = requests.post(
+                self.url("/api/fs/browse"),
+                json={"initial_dir": self.tmp.name},
+                timeout=10,
+            )
+
+        thread = threading.Thread(target=first_call, daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(5))
+        second = requests.post(
+            self.url("/api/fs/browse"),
+            json={"initial_dir": self.tmp.name},
+            timeout=3,
+        )
+        self.assertEqual(second.status_code, 409)
+        self.assertIn("Диалог уже открыт", second.json()["error"])
+        release.set()
+        thread.join(10)
+        self.assertEqual(responses["first"].status_code, 200)
 
     def test_files_thumb(self):
         response = requests.get(self.url("/api/files/thumb?path=" + quote(str(self.gcode))), timeout=3)
@@ -420,6 +471,132 @@ class ApiTests(unittest.TestCase):
             timeout=3,
         )
         self.assertEqual(unknown.status_code, 404)
+
+    def test_printer_update_name_only_keeps_fields(self):
+        created = requests.post(
+            self.url("/api/printers"),
+            json={"name": "M", "host": "10.0.0.8", "port": 7125, "mainsail_port": 5000},
+            timeout=3,
+        )
+        self.assertEqual(created.status_code, 201)
+        response = requests.put(self.printer_url("10.0.0.8:7125"), json={"name": "M2"}, timeout=3)
+        self.assertEqual(response.status_code, 200)
+        entry = next(item for item in self.saved_config()["printers"] if item["host"] == "10.0.0.8")
+        self.assertEqual(entry["name"], "M2")
+        self.assertEqual(entry["port"], 7125)
+        self.assertEqual(entry["mainsail_port"], 5000)
+        stored = next(printer for printer in self.monitor.printers if printer.key == "10.0.0.8:7125")
+        self.assertEqual(stored.mainsail_port, 5000)
+        self.assertEqual(stored.name, "M2")
+
+    def test_printer_name_length_limited(self):
+        too_long = "я" * 61
+        create = requests.post(
+            self.url("/api/printers"),
+            json={"name": too_long, "host": "10.0.0.9", "port": 7125},
+            timeout=3,
+        )
+        self.assertEqual(create.status_code, 400)
+        self.assertIn("длиннее", create.json()["error"])
+        update = requests.put(self.printer_url(self.key), json={"name": too_long}, timeout=3)
+        self.assertEqual(update.status_code, 400)
+        self.assertIn("длиннее", update.json()["error"])
+
+    def test_bulk_rename_persists(self):
+        created = requests.post(
+            self.url("/api/printers"),
+            json={"name": "Второй", "host": "10.0.0.10", "port": 7125},
+            timeout=3,
+        )
+        self.assertEqual(created.status_code, 201)
+        response = requests.post(
+            self.url("/api/printers/rename"),
+            json={
+                "updates": [
+                    {"key": self.key, "name": "Первый"},
+                    {"key": "10.0.0.10:7125", "name": "Второй новый"},
+                ]
+            },
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["renamed"], 2)
+        self.assertEqual(payload["errors"], [])
+        names = {
+            f"{item['host']}:{item['port']}": item["name"]
+            for item in self.saved_config()["printers"]
+        }
+        self.assertEqual(names[self.key], "Первый")
+        self.assertEqual(names["10.0.0.10:7125"], "Второй новый")
+        monitor_names = {printer.key: printer.name for printer in self.monitor.printers}
+        self.assertEqual(monitor_names[self.key], "Первый")
+
+    def test_bulk_rename_reports_errors(self):
+        created = requests.post(
+            self.url("/api/printers"),
+            json={"name": "Второй", "host": "10.0.0.12", "port": 7125},
+            timeout=3,
+        )
+        self.assertEqual(created.status_code, 201)
+        response = requests.post(
+            self.url("/api/printers/rename"),
+            json={
+                "updates": [
+                    {"key": "10.9.9.9:7125", "name": "Нет"},
+                    {"key": "10.0.0.12:7125", "name": "   "},
+                    {"key": self.key, "name": "Новое"},
+                ]
+            },
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["renamed"], 1)
+        self.assertEqual(len(payload["errors"]), 2)
+        self.assertTrue(any("10.9.9.9:7125" in error for error in payload["errors"]))
+        self.assertTrue(any("Пустое имя" in error for error in payload["errors"]))
+        names = {printer.key: printer.name for printer in self.app.config.printers}
+        self.assertEqual(names[self.key], "Новое")
+        self.assertEqual(names["10.0.0.12:7125"], "Второй")
+
+    def test_concurrent_printer_updates_persist(self):
+        created = requests.post(
+            self.url("/api/printers"),
+            json={"name": "Второй", "host": "10.0.0.11", "port": 7125},
+            timeout=3,
+        )
+        self.assertEqual(created.status_code, 201)
+        barrier = threading.Barrier(2)
+        results = {}
+
+        def rename(key, name):
+            barrier.wait(5)
+            response = requests.put(self.printer_url(key), json={"name": name}, timeout=5)
+            results[key] = response.status_code
+
+        threads = [
+            threading.Thread(target=rename, args=(self.key, "Первый новый")),
+            threading.Thread(target=rename, args=("10.0.0.11:7125", "Второй новый")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(results[self.key], 200)
+        self.assertEqual(results["10.0.0.11:7125"], 200)
+        names = {
+            f"{item['host']}:{item['port']}": item["name"]
+            for item in self.saved_config()["printers"]
+        }
+        self.assertEqual(names[self.key], "Первый новый")
+        self.assertEqual(names["10.0.0.11:7125"], "Второй новый")
+
+    def test_web_uses_bulk_rename_endpoint(self):
+        source = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(source.count('"/api/printers/rename"'), 1)
+        self.assertIn("BROWSE_TIMEOUT_MS = 300000", source)
+        self.assertNotIn('"Переименовано принтеров: "', source)
 
     def test_pause_calls_moonraker(self):
         response = requests.post(self.url(f"/api/print/{self.key}/pause"), timeout=3)

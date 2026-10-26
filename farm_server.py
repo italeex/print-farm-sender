@@ -48,6 +48,9 @@ JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 NO_CACHE = "no-cache, no-store, must-revalidate"
 IMAGE_CACHE = "no-cache"
 BROWSE_TIMEOUT = 300.0
+NAME_MAX_LEN = 60
+CONFIG_LOCK = threading.RLock()
+BROWSE_LOCK = threading.Lock()
 DIALOG_SCRIPT = """
 import json
 import sys
@@ -59,7 +62,7 @@ root.withdraw()
 root.attributes("-topmost", True)
 options = {
     "title": "Выберите gcode-файлы",
-    "filetypes": [("G-code", "*.gcode"), ("Все файлы", "*.*")],
+    "filetypes": [("G-code", "*.gcode")],
 }
 if len(sys.argv) > 1 and sys.argv[1]:
     options["initialdir"] = sys.argv[1]
@@ -140,7 +143,9 @@ def _native_browse_files(initial_dir: str = "") -> list[str]:
         raw_paths = json.loads(completed.stdout or "[]")
     except ValueError as exc:
         raise BrowseError("Диалог выбора файлов вернул некорректный ответ") from exc
-    return existing_gcode_paths(raw_paths)
+    if not isinstance(raw_paths, list):
+        raise BrowseError("Диалог выбора файлов вернул некорректный ответ")
+    return [str(item) for item in raw_paths]
 
 
 class Journal:
@@ -326,6 +331,9 @@ class FarmHandler(BaseHTTPRequestHandler):
             self.app.job.cancel()
             self._send_json({"ok": True})
             return
+        if path == "/api/printers/rename":
+            self._api_printer_rename()
+            return
         if path == "/api/printers":
             self._api_printer_create()
             return
@@ -457,13 +465,27 @@ class FarmHandler(BaseHTTPRequestHandler):
         browse = getattr(self.app, "browse_files", None)
         if not callable(browse):
             browse = _native_browse_files
+        if not BROWSE_LOCK.acquire(blocking=False):
+            self._send_error(409, "Диалог уже открыт")
+            return
         try:
-            paths = browse(initial_dir.strip())
+            raw = browse(initial_dir.strip())
         except Exception as exc:
             LOGGER.warning("Диалог выбора файлов недоступен: %s", exc)
-            self._send_error(501, f"Не удалось открыть диалог выбора файлов: {exc}")
+            self._send_error(501, "Не удалось открыть диалог выбора файлов")
             return
-        self._send_json({"paths": existing_gcode_paths(paths)})
+        finally:
+            BROWSE_LOCK.release()
+        if not isinstance(raw, (list, tuple)):
+            raw = []
+        paths = existing_gcode_paths(raw)
+        self._send_json(
+            {
+                "paths": paths,
+                "rejected": len(raw) - len(paths),
+                "cancelled": not raw,
+            }
+        )
 
     def _api_file_thumb(self, query) -> None:
         raw = self._query_text(query, "path")
@@ -559,11 +581,12 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._send_error(400, str(exc))
             return
         if paths:
-            self.app.config.last_dir = str(paths[0].parent)
-            try:
-                save_config(self.app.config, self.app.config_path)
-            except OSError as exc:
-                self.app.journal.add(f"Не удалось сохранить каталог: {exc}", "warning")
+            with CONFIG_LOCK:
+                self.app.config.last_dir = str(paths[0].parent)
+                try:
+                    save_config(self.app.config, self.app.config_path)
+                except OSError as exc:
+                    self.app.journal.add(f"Не удалось сохранить каталог: {exc}", "warning")
         self.app.journal.add(f"Отправка запущена: файлов {len(paths)}, принтеров {len(printers)}")
         self._send_json({"ok": True, "files": len(paths), "printers": len(printers)}, status=202)
 
@@ -577,67 +600,139 @@ class FarmHandler(BaseHTTPRequestHandler):
         printer = self._parse_printer(payload)
         if printer is None:
             return
-        if any(item.key == printer.key for item in self.app.config.printers):
-            self._send_error(409, "Принтер с таким адресом уже добавлен")
-            return
-        previous = list(self.app.config.printers)
-        self.app.config.printers = previous + [printer]
-        if not self._persist_printers(previous):
-            return
+        with CONFIG_LOCK:
+            printers = list(self.app.config.printers)
+            if any(item.key == printer.key for item in printers):
+                self._send_error(409, "Принтер с таким адресом уже добавлен")
+                return
+            self.app.config.printers = printers + [printer]
+            if not self._persist_printers(printers):
+                return
         self.app.journal.add(f"Принтер добавлен: {printer.name}")
         self._send_json({"ok": True, "printer": self._printer_payload(printer)}, status=201)
 
     def _api_printer_update(self, raw_key: str) -> None:
         key = raw_key.strip("/")
-        printers = self.app.config.printers
-        index = next((position for position, item in enumerate(printers) if item.key == key), None)
-        if index is None:
-            self._send_error(404, "Принтер не найден")
-            return
         payload = self._read_json()
         if payload is None:
             return
-        printer = self._parse_printer(payload)
-        if printer is None:
-            return
-        if any(item.key == printer.key for position, item in enumerate(printers) if position != index):
-            self._send_error(409, "Принтер с таким адресом уже добавлен")
-            return
-        previous = list(printers)
-        updated = list(printers)
-        updated[index] = printer
-        self.app.config.printers = updated
-        if not self._persist_printers(previous):
-            return
+        with CONFIG_LOCK:
+            printers = list(self.app.config.printers)
+            index = next((position for position, item in enumerate(printers) if item.key == key), None)
+            if index is None:
+                self._send_error(404, "Принтер не найден")
+                return
+            printer = self._parse_printer(payload, printers[index])
+            if printer is None:
+                return
+            if any(item.key == printer.key for position, item in enumerate(printers) if position != index):
+                self._send_error(409, "Принтер с таким адресом уже добавлен")
+                return
+            updated = list(printers)
+            updated[index] = printer
+            self.app.config.printers = updated
+            if not self._persist_printers(printers):
+                return
         self.app.journal.add(f"Принтер сохранён: {printer.name}")
         self._send_json({"ok": True, "printer": self._printer_payload(printer)})
 
+    def _api_printer_rename(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_updates = payload.get("updates")
+        if not isinstance(raw_updates, list) or not raw_updates:
+            self._send_error(400, "Ожидался непустой список updates")
+            return
+        errors: list[str] = []
+        applied: dict[str, str] = {}
+        with CONFIG_LOCK:
+            printers = list(self.app.config.printers)
+            known = {item.key for item in printers}
+            for item in raw_updates:
+                if not isinstance(item, dict):
+                    errors.append("Некорректная запись")
+                    continue
+                key = str(item.get("key") or "").strip()
+                name = str(item.get("name") or "").strip()
+                if not key:
+                    errors.append("Не указан ключ принтера")
+                    continue
+                if key not in known:
+                    errors.append(f"Принтер не найден: {key}")
+                    continue
+                if key in applied:
+                    errors.append(f"Повторное обновление: {key}")
+                    continue
+                if not name:
+                    errors.append(f"Пустое имя: {key}")
+                    continue
+                if len(name) > NAME_MAX_LEN:
+                    errors.append(f"Имя длиннее {NAME_MAX_LEN} символов: {key}")
+                    continue
+                applied[key] = name
+            if applied:
+                updated = [
+                    Printer(
+                        name=applied[item.key],
+                        host=item.host,
+                        port=item.port,
+                        mainsail_port=item.mainsail_port,
+                    )
+                    if item.key in applied
+                    else item
+                    for item in printers
+                ]
+                self.app.config.printers = updated
+                if not self._persist_printers(printers):
+                    return
+        if applied:
+            self.app.journal.add(f"Переименовано принтеров: {len(applied)}")
+        self._send_json({"ok": True, "renamed": len(applied), "errors": errors})
+
     def _api_printer_delete(self, raw_key: str) -> None:
         key = raw_key.strip("/")
-        printers = self.app.config.printers
-        index = next((position for position, item in enumerate(printers) if item.key == key), None)
-        if index is None:
-            self._send_error(404, "Принтер не найден")
-            return
-        previous = list(printers)
-        self.app.config.printers = [item for position, item in enumerate(printers) if position != index]
-        if not self._persist_printers(previous):
-            return
+        with CONFIG_LOCK:
+            printers = list(self.app.config.printers)
+            index = next((position for position, item in enumerate(printers) if item.key == key), None)
+            if index is None:
+                self._send_error(404, "Принтер не найден")
+                return
+            self.app.config.printers = [item for position, item in enumerate(printers) if position != index]
+            if not self._persist_printers(printers):
+                return
         self.app.journal.add(f"Принтер удалён: {key}")
         self._send_json({"ok": True})
 
-    def _parse_printer(self, payload: dict) -> Printer | None:
+    def _parse_printer(self, payload: dict, base: Printer | None = None) -> Printer | None:
         host = str(payload.get("host") or "").strip()
+        if base is not None and not host:
+            host = base.host
         if not host:
             self._send_error(400, "Укажите адрес принтера")
             return None
-        port = self._parse_port(payload.get("port"), DEFAULT_PORT)
+        port = self._parse_port(payload.get("port"), base.port if base is not None else DEFAULT_PORT)
         if port is None:
             return None
-        mainsail_port = self._parse_port(payload.get("mainsail_port"), MAINSAIL_PORT)
+        mainsail_port = self._parse_port(
+            payload.get("mainsail_port"),
+            base.mainsail_port if base is not None else MAINSAIL_PORT,
+        )
         if mainsail_port is None:
             return None
-        name = str(payload.get("name") or "").strip() or host
+        raw_name = payload.get("name")
+        if raw_name is None and base is not None:
+            name = base.name
+        else:
+            name = str(raw_name or "").strip()
+        if not name:
+            if base is not None:
+                self._send_error(400, "Имя принтера не может быть пустым")
+                return None
+            name = host
+        if len(name) > NAME_MAX_LEN:
+            self._send_error(400, f"Имя принтера не должно быть длиннее {NAME_MAX_LEN} символов")
+            return None
         return Printer(name=name, host=host, port=port, mainsail_port=mainsail_port)
 
     def _parse_port(self, raw, fallback: int) -> int | None:

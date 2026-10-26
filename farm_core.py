@@ -198,16 +198,20 @@ def load_config(path: Path = CONFIG_PATH, *, seed_base: Path = CREALITY_HOME) ->
     return AppConfig.from_dict(data)
 
 
+_SAVE_LOCK = threading.Lock()
+
+
 def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(path.name + ".tmp")
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            json.dump(config.to_dict(), handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
+        with _SAVE_LOCK:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(config.to_dict(), handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
     finally:
         try:
             temp_path.unlink()

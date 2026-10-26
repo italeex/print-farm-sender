@@ -5,6 +5,7 @@ const POLL_JOB_MS = 1000;
 const FETCH_TIMEOUT_MS = 5000;
 const API_TIMEOUT_MS = 8000;
 const FS_TIMEOUT_MS = 15000;
+const BROWSE_TIMEOUT_MS = 300000;
 const TOAST_MS = 5000;
 const HEARTBEAT_MS = 10000;
 const COMPACT_KEY = "farm.compact";
@@ -110,6 +111,7 @@ let journalCloseEl = null;
 let lastErrorToast = 0;
 let pollTimer = 0;
 let inFlight = false;
+let refreshRequested = false;
 let sendBusy = false;
 let lastJobRunning = false;
 let confirmResolve = null;
@@ -200,16 +202,30 @@ function clockShort(seconds) {
   return String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
 }
 
+function clockFinish(seconds) {
+  const date = new Date(seconds * 1000);
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  if (sameDay) return clockShort(seconds);
+  const day = String(date.getDate()).padStart(2, "0") + "." + String(date.getMonth() + 1).padStart(2, "0");
+  return day + " " + clockShort(seconds);
+}
+
 function formatEta(status, seconds, finishAt) {
   if (status === "paused") return "на паузе";
   if (status !== "printing") return "—";
   const finish = parseFinish(finishAt);
+  const now = Date.now() / 1000;
+  if (finish !== null && finish <= now) return "завершается";
   let remaining = Number(seconds);
-  if (finish !== null) remaining = finish - Date.now() / 1000;
+  if (finish !== null) remaining = finish - now;
   if (!Number.isFinite(remaining) || remaining <= 0) {
-    return finish !== null ? "до " + clockShort(finish) : "—";
+    return finish !== null ? "до " + clockFinish(finish) : "—";
   }
-  if (finish !== null) return formatDuration(remaining) + " · до " + clockShort(finish);
+  if (finish !== null) return formatDuration(remaining) + " · до " + clockFinish(finish);
   return formatDuration(remaining);
 }
 
@@ -435,9 +451,22 @@ async function fetchState() {
   } finally {
     window.clearTimeout(timer);
     inFlight = false;
+    if (refreshRequested) {
+      refreshRequested = false;
+      fetchState();
+      return;
+    }
     const delay = state.job && state.job.running ? POLL_JOB_MS : POLL_IDLE_MS;
     pollTimer = window.setTimeout(fetchState, delay);
   }
+}
+
+async function refreshState() {
+  if (inFlight) {
+    refreshRequested = true;
+    return;
+  }
+  await fetchState();
 }
 
 function noteJobExit() {
@@ -572,7 +601,9 @@ function layoutCards() {
     ordered
       .map(function (record) {
         const key = String(record.el.dataset.key);
-        return state.grouped ? key + ":" + statusOf(record.view) : key;
+        if (!state.grouped) return key;
+        const name = String((record.view && record.view.name) || "");
+        return key + ":" + statusOf(record.view) + ":" + name;
       })
       .join(",");
   if (signature === layoutSignature) return;
@@ -1120,7 +1151,7 @@ async function printAction(key, action) {
     });
     const name = record && record.view ? record.view.name || record.view.key : key;
     toast((ACTION_LABELS[action] || "Готово") + ": " + name);
-    await fetchState();
+    await refreshState();
   } catch (error) {
     toast(errorText(error, "Не удалось выполнить действие."), "error");
   } finally {
@@ -1130,9 +1161,27 @@ async function printAction(key, action) {
 }
 
 async function bulkPrintAction(action) {
-  const keys = Array.from(state.selected);
-  if (!keys.length) {
+  const selected = Array.from(state.selected);
+  if (!selected.length) {
     toast("Выберите принтеры.", "warn");
+    return;
+  }
+  const views = new Map(
+    state.printers.map(function (view) {
+      return [view.key, view];
+    })
+  );
+  const applicable = function (key) {
+    const view = views.get(key);
+    const status = view && view.state ? view.state : "";
+    if (action === "pause") return status === "printing";
+    if (action === "resume") return status === "paused";
+    return true;
+  };
+  const keys = selected.filter(applicable);
+  const skipped = selected.length - keys.length;
+  if (!keys.length) {
+    toast("Нет принтеров в подходящем состоянии.", "warn");
     return;
   }
   if (bulkBusy) return;
@@ -1142,6 +1191,7 @@ async function bulkPrintAction(action) {
   }
   bulkBusy = true;
   updateSelectionUI();
+  toast("Массовое действие выполняется…");
   const results = await Promise.allSettled(
     keys.map(function (key) {
       return requestJSON("/api/print/" + encodeURIComponent(key) + "/" + action, {
@@ -1151,32 +1201,32 @@ async function bulkPrintAction(action) {
     })
   );
   let ok = 0;
-  let failed = 0;
-  let message = "";
-  for (const result of results) {
+  const failed = [];
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
     if (result.status === "fulfilled") {
       ok += 1;
       continue;
     }
-    failed += 1;
-    if (!message) message = errorText(result.reason, "Ошибка");
+    failed.push(
+      ((views.get(keys[index]) && views.get(keys[index]).name) || keys[index]) +
+        ": " +
+        errorText(result.reason, "Ошибка")
+    );
   }
   const label = ACTION_LABELS[action] || "Готово";
-  if (failed) {
-    toast(label + ". Успешно: " + ok + ", ошибок: " + failed + ". " + message, ok ? "warn" : "error");
+  const skippedText = skipped ? " Пропущено: " + skipped + "." : "";
+  if (failed.length) {
+    toast(
+      label + ". Успешно: " + ok + ", ошибок: " + failed.length + "." + skippedText + " " + failed.join("; "),
+      ok ? "warn" : "error"
+    );
   } else {
-    toast(label + ": " + ok + ".");
+    toast(label + ": " + ok + "." + skippedText);
   }
   bulkBusy = false;
   updateSelectionUI();
-  await fetchState();
-}
-
-function mainsailPortOf(view) {
-  const match = String((view && view.mainsail_url) || "").match(/:(\d+)\/?$/);
-  if (match) return Number(match[1]);
-  const port = Number(view && view.mainsail_port);
-  return Number.isFinite(port) && port > 0 ? port : 4408;
+  await refreshState();
 }
 
 function renameTargets() {
@@ -1188,9 +1238,24 @@ function renameTargets() {
     });
     return view ? [view] : [];
   }
-  return state.printers.filter(function (view) {
-    return state.selected.has(view.key);
-  });
+  const ordered = [];
+  const seen = new Set();
+  if (cardsEl) {
+    for (const el of cardsEl.children) {
+      if (!el.classList || !el.classList.contains("card")) continue;
+      const key = el.dataset.key;
+      const record = cards.get(key);
+      if (!record || !record.view || !state.selected.has(key)) continue;
+      ordered.push(record.view);
+      seen.add(key);
+    }
+  }
+  for (const view of state.printers) {
+    if (!state.selected.has(view.key) || seen.has(view.key)) continue;
+    ordered.push(view);
+    seen.add(view.key);
+  }
+  return ordered;
 }
 
 function resolveName(pattern, view, index) {
@@ -1275,16 +1340,11 @@ async function confirmRename() {
     toast("Введите имя.", "warn");
     return;
   }
-  const jobs = targets.map(function (view, index) {
-    const name = renameMode === "bulk" ? resolveName(pattern, view, index) : pattern;
-    return {
-      key: view.key,
-      name: name,
-      body: { name: name, host: view.host, port: view.port, mainsail_port: mainsailPortOf(view) },
-    };
+  const names = targets.map(function (view, index) {
+    return renameMode === "bulk" ? resolveName(pattern, view, index) : pattern;
   });
-  const empty = jobs.some(function (job) {
-    return !job.name;
+  const empty = names.some(function (name) {
+    return !name;
   });
   if (empty) {
     toast("Имя не может быть пустым.", "warn");
@@ -1292,34 +1352,49 @@ async function confirmRename() {
   }
   renameBusy = true;
   if (renameConfirmEl) renameConfirmEl.disabled = true;
-  const results = await Promise.allSettled(
-    jobs.map(function (job) {
-      return requestJSON("/api/printers/" + encodeURIComponent(job.key), {
-        method: "PUT",
-        body: job.body,
-      });
-    })
-  );
   let ok = 0;
-  let failed = 0;
-  let message = "";
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      ok += 1;
-      continue;
+  let errors = [];
+  if (renameMode === "bulk") {
+    toast("Переименование выполняется…");
+    try {
+      const data = await requestJSON("/api/printers/rename", {
+        method: "POST",
+        body: {
+          updates: targets.map(function (view, index) {
+            return { key: view.key, name: names[index] };
+          }),
+        },
+      });
+      ok = Number(data && data.renamed) || 0;
+      errors = data && Array.isArray(data.errors) ? data.errors.map(String) : [];
+    } catch (error) {
+      errors = [errorText(error, "Не удалось переименовать.")];
     }
-    failed += 1;
-    if (!message) message = errorText(result.reason, "Ошибка");
+  } else {
+    const target = targets[0];
+    try {
+      await requestJSON("/api/printers/" + encodeURIComponent(target.key), {
+        method: "PUT",
+        body: { name: names[0] },
+      });
+      ok = 1;
+    } catch (error) {
+      const label = target.name || target.key;
+      errors = ["«" + label + "»: " + errorText(error, "Не удалось переименовать.")];
+    }
   }
   renameBusy = false;
   if (renameConfirmEl) renameConfirmEl.disabled = false;
-  closeModal(modalRename);
-  await fetchState();
-  if (failed) {
-    toast("Переименовано: " + ok + ", ошибок: " + failed + ". " + message, ok ? "warn" : "error");
-  } else {
-    toast("Переименовано принтеров: " + ok + ".");
+  if (!errors.length) closeModal(modalRename);
+  await refreshState();
+  if (errors.length) {
+    toast(
+      "Переименовано: " + ok + ", ошибок: " + errors.length + ". " + errors.join("; "),
+      ok ? "warn" : "error"
+    );
+    return;
   }
+  toast("Переименовано " + ok + " " + plural(ok, "принтер", "принтера", "принтеров") + ".");
 }
 
 function gcodePaths(data) {
@@ -1357,7 +1432,7 @@ async function browseFiles() {
     const data = await requestJSON("/api/fs/browse", {
       method: "POST",
       body: { initial_dir: state.lastDir || "" },
-      timeout: FS_TIMEOUT_MS,
+      timeout: BROWSE_TIMEOUT_MS,
     });
     const dir =
       data && typeof data.dir === "string"
@@ -1377,7 +1452,13 @@ async function browseFiles() {
       added += 1;
     }
     if (!added) {
-      toast("Файлы .gcode не выбраны.", "warn");
+      if (data && data.cancelled) {
+        toast("Диалог закрыт без выбора.", "warn");
+      } else if (data && Number(data.rejected) > 0) {
+        toast("Файлы .gcode не выбраны. Отклонено файлов: " + Number(data.rejected) + ".", "warn");
+      } else {
+        toast("Файлы .gcode не выбраны.", "warn");
+      }
       return;
     }
     state.files = Array.from(merged).sort();
@@ -1800,7 +1881,7 @@ async function savePrinter(event) {
     toast(oldKey ? "Принтер сохранён." : "Принтер добавлен.");
     resetPrinterForm();
     await refreshPrinterList(true);
-    await fetchState();
+    await refreshState();
   } catch (error) {
     toast(errorText(error, "Не удалось сохранить принтер."), "error");
   } finally {
@@ -1826,7 +1907,7 @@ async function deletePrinter() {
     toast("Принтер удалён.");
     resetPrinterForm();
     await refreshPrinterList(true);
-    await fetchState();
+    await refreshState();
   } catch (error) {
     toast(errorText(error, "Не удалось удалить принтер."), "error");
   } finally {
@@ -1864,7 +1945,7 @@ async function sendFiles() {
         " × " +
         state.selected.size
     );
-    await fetchState();
+    await refreshState();
   } catch (error) {
     toast(errorText(error, "Не удалось начать отправку."), "error");
   } finally {
@@ -1882,7 +1963,7 @@ async function cancelJob() {
   try {
     await requestJSON("/api/job/cancel", { method: "POST", body: {} });
     toast("Отмена запрошена.", "warn");
-    await fetchState();
+    await refreshState();
   } catch (error) {
     toast(errorText(error, "Не удалось отменить отправку."), "error");
   } finally {
