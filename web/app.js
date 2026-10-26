@@ -8,6 +8,8 @@ const FS_TIMEOUT_MS = 15000;
 const TOAST_MS = 5000;
 const HEARTBEAT_MS = 10000;
 const COMPACT_KEY = "farm.compact";
+const GROUPED_KEY = "farm.grouped";
+const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
 const STATE_LABELS = {
   printing: "Печатает",
@@ -18,6 +20,14 @@ const STATE_LABELS = {
 };
 const SUMMARY_KEYS = ["printing", "paused", "idle", "error", "offline"];
 const FILTER_KEYS = ["all", "printing", "paused", "idle", "error", "offline"];
+const GROUP_ORDER = ["printing", "paused", "error", "idle", "offline"];
+const GROUP_LABELS = {
+  printing: "Печатают",
+  paused: "Пауза",
+  error: "Ошибки",
+  idle: "Свободны",
+  offline: "Не в сети",
+};
 const ACTION_LABELS = {
   pause: "Пауза включена",
   resume: "Печать продолжена",
@@ -34,6 +44,8 @@ const state = {
   filter: "all",
   query: "",
   compact: false,
+  grouped: false,
+  lastDir: "",
 };
 
 const cards = new Map();
@@ -58,6 +70,13 @@ let modalFiles = null;
 let modalPrinters = null;
 let modalError = null;
 let modalConfirm = null;
+let modalRename = null;
+let renameTitleEl = null;
+let renameHintEl = null;
+let renameInputEl = null;
+let renamePreviewEl = null;
+let renameConfirmEl = null;
+let fsBrowseEl = null;
 let confirmTextEl = null;
 let errorTitleEl = null;
 let errorLabelEl = null;
@@ -107,6 +126,12 @@ let fsRequest = 0;
 let fsPreviewSrc = "";
 let lastFsPath = "";
 let printerItems = [];
+let layoutSignature = "";
+let bulkBusy = false;
+let renameMode = "single";
+let renameKey = "";
+let renameBusy = false;
+let browseBusy = false;
 
 function pick(root, selectors) {
   for (const selector of selectors) {
@@ -160,12 +185,32 @@ function formatDuration(seconds) {
   return minutes + " мин";
 }
 
-function formatEta(status, seconds) {
+function parseFinish(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && String(value).trim() !== "") {
+    return numeric < 1000000000000 ? numeric : numeric / 1000;
+  }
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date.getTime() / 1000;
+}
+
+function clockShort(seconds) {
+  const date = new Date(seconds * 1000);
+  return String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
+}
+
+function formatEta(status, seconds, finishAt) {
   if (status === "paused") return "на паузе";
   if (status !== "printing") return "—";
-  const number = Number(seconds);
-  if (!Number.isFinite(number) || number <= 0) return "—";
-  return formatDuration(number);
+  const finish = parseFinish(finishAt);
+  let remaining = Number(seconds);
+  if (finish !== null) remaining = finish - Date.now() / 1000;
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    return finish !== null ? "до " + clockShort(finish) : "—";
+  }
+  if (finish !== null) return formatDuration(remaining) + " · до " + clockShort(finish);
+  return formatDuration(remaining);
 }
 
 function formatTemp(value) {
@@ -340,7 +385,9 @@ async function requestJSON(path, options) {
         data && (data.error || data.message)
           ? String(data.error || data.message)
           : "Ошибка сервера (HTTP " + response.status + ")";
-      throw new Error(message);
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
     return data;
   } catch (error) {
@@ -372,6 +419,7 @@ async function fetchState() {
     state.summary = data.summary || {};
     state.job = data.job || {};
     state.config = data.config || {};
+    state.lastDir = typeof state.config.last_dir === "string" ? state.config.last_dir : "";
     const refreshSeconds = Number(state.config.refresh_seconds);
     if (Number.isFinite(refreshSeconds) && refreshSeconds > 0) {
       setText(refreshSecondsEl, refreshSeconds);
@@ -465,6 +513,7 @@ function renderCards() {
     cards.delete(key);
     state.selected.delete(key);
   }
+  layoutCards();
   updateEmptyState();
 }
 
@@ -486,11 +535,89 @@ function countVisible() {
   return visible;
 }
 
+function statusOf(view) {
+  const status = view && view.state ? view.state : "offline";
+  return GROUP_ORDER.indexOf(status) === -1 ? "offline" : status;
+}
+
+function groupCounts() {
+  const counts = {};
+  for (const key of GROUP_ORDER) counts[key] = 0;
+  for (const record of cards.values()) counts[statusOf(record.view)] += 1;
+  return counts;
+}
+
+function layoutCards() {
+  if (!cardsEl) return;
+  const ordered = [];
+  if (state.grouped) {
+    for (const record of cards.values()) ordered.push(record);
+    ordered.sort(function (left, right) {
+      const rank = GROUP_ORDER.indexOf(statusOf(left.view)) - GROUP_ORDER.indexOf(statusOf(right.view));
+      if (rank !== 0) return rank;
+      return String((left.view && left.view.name) || "").localeCompare(String((right.view && right.view.name) || ""), "ru");
+    });
+  } else {
+    for (const view of state.printers) {
+      const record = cards.get(view.key);
+      if (record && ordered.indexOf(record) === -1) ordered.push(record);
+    }
+    for (const record of cards.values()) {
+      if (ordered.indexOf(record) === -1) ordered.push(record);
+    }
+  }
+  const signature =
+    (state.grouped ? "g" : "f") +
+    "|" +
+    ordered
+      .map(function (record) {
+        const key = String(record.el.dataset.key);
+        return state.grouped ? key + ":" + statusOf(record.view) : key;
+      })
+      .join(",");
+  if (signature === layoutSignature) return;
+  layoutSignature = signature;
+  const focus = document.activeElement;
+  const keepFocus = focus instanceof HTMLElement && cardsEl.contains(focus) ? focus : null;
+  for (const head of Array.from(cardsEl.querySelectorAll(".group-head"))) head.remove();
+  if (state.grouped) {
+    const counts = groupCounts();
+    let current = "";
+    for (const record of ordered) {
+      const status = statusOf(record.view);
+      if (status !== current) {
+        current = status;
+        const head = document.createElement("div");
+        head.className = "group-head";
+        head.dataset.group = status;
+        const label = document.createElement("span");
+        label.textContent = GROUP_LABELS[status] || status;
+        const count = document.createElement("b");
+        count.textContent = String(counts[status] || 0);
+        head.appendChild(label);
+        head.appendChild(count);
+        cardsEl.appendChild(head);
+      }
+      cardsEl.appendChild(record.el);
+    }
+  } else {
+    for (const record of ordered) cardsEl.appendChild(record.el);
+  }
+  if (keepFocus && keepFocus.isConnected && document.activeElement !== keepFocus) {
+    keepFocus.focus({ preventScroll: true });
+  }
+}
+
 function thumbEmptyMessage(status) {
   if (status === "offline") return "Не в сети";
   if (status === "error") return "Ошибка";
   if (status === "idle") return "Готов к загрузке";
   return "Превью нет";
+}
+
+function cameraUrl(view) {
+  const host = view && typeof view.host === "string" ? view.host.trim() : "";
+  return "http://" + host + ":" + CAMERA_PORT + "/";
 }
 
 function createCard(view) {
@@ -527,10 +654,12 @@ function createCard(view) {
     uploadBar: field(el, "upload-bar"),
     uploadPct: field(el, "upload-pct"),
     mainsail: field(el, "mainsail"),
+    camera: field(el, "camera"),
     pause: field(el, "pause"),
     resume: field(el, "resume"),
     menu: field(el, "menu"),
     cardMenu: field(el, "card-menu"),
+    cancelPrint: field(el, "cancel-print") || el.querySelector('[data-action="cancel-print"]'),
   };
   if (!refs.stateLabel) refs.stateLabel = refs.pill;
   const record = {
@@ -582,7 +711,7 @@ function upsertCard(view) {
   }
   if (refs.progressBar) refs.progressBar.style.width = percent + "%";
   setText(refs.progressPct, percent + "%");
-  setText(refs.eta, formatEta(status, view.eta_seconds));
+  setText(refs.eta, formatEta(status, view.eta_seconds, view.finish_at));
   setText(refs.layer, view.layer_total ? view.layer + " / " + view.layer_total : "—");
   setText(refs.nozzle, formatTemp(view.nozzle));
   setText(refs.bed, formatTemp(view.bed));
@@ -620,14 +749,28 @@ function upsertCard(view) {
     }
   }
 
+  if (refs.camera) {
+    const cameraHost = typeof view.host === "string" ? view.host.trim() : "";
+    if (cameraHost) {
+      const cameraHref = cameraUrl(view);
+      refs.camera.setAttribute("href", cameraHref);
+      refs.camera.setAttribute("rel", "noopener noreferrer");
+      refs.camera.removeAttribute("aria-disabled");
+      refs.camera.classList.remove("disabled");
+      refs.camera.title = cameraHref;
+    } else {
+      refs.camera.removeAttribute("href");
+      refs.camera.setAttribute("aria-disabled", "true");
+      refs.camera.classList.add("disabled");
+      refs.camera.title = "Адрес камеры неизвестен";
+    }
+  }
+
   const controllable = status === "printing" || status === "paused";
   if (refs.pause) refs.pause.hidden = status !== "printing";
   if (refs.resume) refs.resume.hidden = status !== "paused";
-  if (refs.menu) refs.menu.hidden = !controllable;
-  if (refs.cardMenu && !controllable) {
-    refs.cardMenu.hidden = true;
-    if (refs.menu) refs.menu.setAttribute("aria-expanded", "false");
-  }
+  if (refs.menu) refs.menu.hidden = false;
+  if (refs.cancelPrint) refs.cancelPrint.hidden = !controllable;
 
   updateThumb(record, view);
 }
@@ -672,6 +815,20 @@ function applyFiltersTo(record) {
   record.el.classList.toggle("hidden", !visible);
 }
 
+function syncSummaryTiles() {
+  if (!summaryEl) return;
+  for (const tile of summaryEl.querySelectorAll("[data-filter]")) {
+    const active = tile.dataset.filter === state.filter;
+    tile.classList.toggle("active", active);
+    tile.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function setFilter(key) {
+  state.filter = FILTER_KEYS.indexOf(key) === -1 ? "all" : key;
+  applyFilters();
+}
+
 function applyFilters() {
   for (const record of cards.values()) applyFiltersTo(record);
   if (filtersEl) {
@@ -686,6 +843,19 @@ function applyFilters() {
       chip.setAttribute("aria-pressed", String(active));
       const counter = pick(chip, ["[data-count]", ".count"]);
       if (counter) setText(counter, counts[key] === undefined ? "" : counts[key]);
+    }
+  }
+  syncSummaryTiles();
+  if (cardsEl) {
+    for (const head of cardsEl.querySelectorAll(".group-head")) {
+      let visible = 0;
+      for (const record of cards.values()) {
+        if (statusOf(record.view) !== head.dataset.group) continue;
+        if (matches(record.view)) visible += 1;
+      }
+      const counter = head.querySelector("b");
+      if (counter) setText(counter, visible);
+      head.hidden = visible === 0;
     }
   }
   updateEmptyState();
@@ -717,6 +887,10 @@ function updateSelectionUI() {
   if (sendButton) {
     sendButton.disabled =
       state.selected.size === 0 || sendBusy || Boolean(state.job && state.job.running);
+  }
+  for (const id of ["bulk-pause", "bulk-resume", "bulk-cancel", "bulk-rename"]) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = bulkBusy || state.selected.size === 0;
   }
   updateSendEstimate();
 }
@@ -810,9 +984,42 @@ function bindFilterClicks() {
     const chip = target instanceof Element ? target.closest("[data-filter]") : null;
     if (!chip) return;
     const key = chip.dataset.filter || "all";
-    state.filter = FILTER_KEYS.indexOf(key) === -1 ? "all" : key;
-    applyFilters();
+    setFilter(key);
   });
+}
+
+function bindSummaryClicks() {
+  if (!summaryEl) return;
+  summaryEl.addEventListener("click", function (event) {
+    const target = event.target instanceof Element ? event.target : null;
+    const tile = target ? target.closest("[data-filter]") : null;
+    if (!tile) return;
+    setFilter(tile.dataset.filter || "all");
+  });
+}
+
+function applyGrouped(value, persist) {
+  state.grouped = Boolean(value);
+  const button = document.getElementById("group-toggle");
+  if (button) button.setAttribute("aria-pressed", String(state.grouped));
+  if (persist) {
+    try {
+      window.localStorage.setItem(GROUPED_KEY, state.grouped ? "1" : "0");
+    } catch {}
+  }
+  layoutSignature = "";
+  layoutCards();
+  applyFilters();
+}
+
+function restoreGrouped() {
+  let stored = null;
+  try {
+    stored = window.localStorage.getItem(GROUPED_KEY);
+  } catch {
+    stored = null;
+  }
+  applyGrouped(stored === "1", false);
 }
 
 function openModal(modal) {
@@ -919,6 +1126,270 @@ async function printAction(key, action) {
   } finally {
     actionBusy.delete(busyKey);
     if (button) button.disabled = false;
+  }
+}
+
+async function bulkPrintAction(action) {
+  const keys = Array.from(state.selected);
+  if (!keys.length) {
+    toast("Выберите принтеры.", "warn");
+    return;
+  }
+  if (bulkBusy) return;
+  if (action === "cancel") {
+    const confirmed = await confirmDialog("Отменить печать на выбранных принтерах (" + keys.length + ")?");
+    if (!confirmed) return;
+  }
+  bulkBusy = true;
+  updateSelectionUI();
+  const results = await Promise.allSettled(
+    keys.map(function (key) {
+      return requestJSON("/api/print/" + encodeURIComponent(key) + "/" + action, {
+        method: "POST",
+        body: {},
+      });
+    })
+  );
+  let ok = 0;
+  let failed = 0;
+  let message = "";
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      ok += 1;
+      continue;
+    }
+    failed += 1;
+    if (!message) message = errorText(result.reason, "Ошибка");
+  }
+  const label = ACTION_LABELS[action] || "Готово";
+  if (failed) {
+    toast(label + ". Успешно: " + ok + ", ошибок: " + failed + ". " + message, ok ? "warn" : "error");
+  } else {
+    toast(label + ": " + ok + ".");
+  }
+  bulkBusy = false;
+  updateSelectionUI();
+  await fetchState();
+}
+
+function mainsailPortOf(view) {
+  const match = String((view && view.mainsail_url) || "").match(/:(\d+)\/?$/);
+  if (match) return Number(match[1]);
+  const port = Number(view && view.mainsail_port);
+  return Number.isFinite(port) && port > 0 ? port : 4408;
+}
+
+function renameTargets() {
+  if (renameMode === "single") {
+    const record = cards.get(renameKey);
+    if (record && record.view) return [record.view];
+    const view = state.printers.find(function (item) {
+      return item.key === renameKey;
+    });
+    return view ? [view] : [];
+  }
+  return state.printers.filter(function (view) {
+    return state.selected.has(view.key);
+  });
+}
+
+function resolveName(pattern, view, index) {
+  const host = String((view && view.host) || "");
+  const octet = host.split(".").pop() || host;
+  return String(pattern || "")
+    .replace(/\{n\}/g, String(index + 1))
+    .replace(/\{ip\}/g, octet)
+    .replace(/\{name\}/g, String((view && view.name) || (view && view.key) || ""))
+    .replace(/\{host\}/g, host)
+    .trim();
+}
+
+function renderRenamePreview() {
+  if (!renamePreviewEl) return;
+  renamePreviewEl.textContent = "";
+  if (renameMode !== "bulk") {
+    renamePreviewEl.hidden = true;
+    return;
+  }
+  renamePreviewEl.hidden = false;
+  const pattern = renameInputEl ? renameInputEl.value : "";
+  const targets = renameTargets();
+  if (!targets.length) {
+    const line = document.createElement("div");
+    line.textContent = "Нет выбранных принтеров";
+    renamePreviewEl.appendChild(line);
+    return;
+  }
+  const limit = Math.min(3, targets.length);
+  for (let index = 0; index < limit; index += 1) {
+    const line = document.createElement("div");
+    line.appendChild(document.createTextNode(String(index + 1) + ". "));
+    const strong = document.createElement("b");
+    strong.textContent = resolveName(pattern, targets[index], index) || "—";
+    line.appendChild(strong);
+    renamePreviewEl.appendChild(line);
+  }
+}
+
+function openRenameModal(mode, key) {
+  if (!modalRename) return;
+  renameMode = mode === "bulk" ? "bulk" : "single";
+  renameKey = key || "";
+  if (renameMode === "single") {
+    const record = cards.get(renameKey);
+    const view = record ? record.view : null;
+    setText(renameTitleEl, "Переименовать принтер");
+    setText(renameHintEl, view ? view.host + ":" + view.port : "");
+    if (renameInputEl) {
+      renameInputEl.value = view ? view.name || "" : "";
+      renameInputEl.placeholder = "Имя принтера";
+    }
+  } else {
+    setText(renameTitleEl, "Переименовать выбранные");
+    setText(renameHintEl, "Шаблон: {n} — номер, {ip} — последний октет, {name} — текущее имя, {host} — адрес.");
+    if (renameInputEl) {
+      renameInputEl.value = "{name}";
+      renameInputEl.placeholder = "Принтер {n}";
+    }
+  }
+  renderRenamePreview();
+  openModal(modalRename);
+  if (renameInputEl) {
+    window.setTimeout(function () {
+      if (!modalRename || modalRename.hidden) return;
+      renameInputEl.focus();
+      renameInputEl.select();
+    }, 0);
+  }
+}
+
+async function confirmRename() {
+  if (renameBusy) return;
+  const pattern = renameInputEl ? renameInputEl.value.trim() : "";
+  const targets = renameTargets();
+  if (!targets.length) {
+    toast("Нечего переименовывать.", "warn");
+    return;
+  }
+  if (!pattern) {
+    toast("Введите имя.", "warn");
+    return;
+  }
+  const jobs = targets.map(function (view, index) {
+    const name = renameMode === "bulk" ? resolveName(pattern, view, index) : pattern;
+    return {
+      key: view.key,
+      name: name,
+      body: { name: name, host: view.host, port: view.port, mainsail_port: mainsailPortOf(view) },
+    };
+  });
+  const empty = jobs.some(function (job) {
+    return !job.name;
+  });
+  if (empty) {
+    toast("Имя не может быть пустым.", "warn");
+    return;
+  }
+  renameBusy = true;
+  if (renameConfirmEl) renameConfirmEl.disabled = true;
+  const results = await Promise.allSettled(
+    jobs.map(function (job) {
+      return requestJSON("/api/printers/" + encodeURIComponent(job.key), {
+        method: "PUT",
+        body: job.body,
+      });
+    })
+  );
+  let ok = 0;
+  let failed = 0;
+  let message = "";
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      ok += 1;
+      continue;
+    }
+    failed += 1;
+    if (!message) message = errorText(result.reason, "Ошибка");
+  }
+  renameBusy = false;
+  if (renameConfirmEl) renameConfirmEl.disabled = false;
+  closeModal(modalRename);
+  await fetchState();
+  if (failed) {
+    toast("Переименовано: " + ok + ", ошибок: " + failed + ". " + message, ok ? "warn" : "error");
+  } else {
+    toast("Переименовано принтеров: " + ok + ".");
+  }
+}
+
+function gcodePaths(data) {
+  const lists = [];
+  if (Array.isArray(data)) lists.push(data);
+  if (data && typeof data === "object") {
+    for (const name of ["files", "paths", "selected", "entries", "items"]) {
+      if (Array.isArray(data[name])) lists.push(data[name]);
+    }
+  }
+  const seen = new Set();
+  const paths = [];
+  for (const list of lists) {
+    for (const item of list) {
+      let path = "";
+      if (typeof item === "string") {
+        path = item;
+      } else if (item && typeof item === "object") {
+        if (typeof item.path === "string") path = item.path;
+        else if (typeof item.name === "string") path = item.name;
+      }
+      if (!path || seen.has(path) || !/\.gcode$/i.test(path)) continue;
+      seen.add(path);
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+async function browseFiles() {
+  if (!fsBrowseEl || browseBusy) return;
+  browseBusy = true;
+  fsBrowseEl.disabled = true;
+  try {
+    const data = await requestJSON("/api/fs/browse", {
+      method: "POST",
+      body: { initial_dir: state.lastDir || "" },
+      timeout: FS_TIMEOUT_MS,
+    });
+    const dir =
+      data && typeof data.dir === "string"
+        ? data.dir
+        : data && typeof data.path === "string"
+          ? data.path
+          : "";
+    if (dir) {
+      state.lastDir = dir;
+      lastFsPath = dir;
+    }
+    const merged = new Set(state.files);
+    let added = 0;
+    for (const path of gcodePaths(data)) {
+      if (merged.has(path)) continue;
+      merged.add(path);
+      added += 1;
+    }
+    if (!added) {
+      toast("Файлы .gcode не выбраны.", "warn");
+      return;
+    }
+    state.files = Array.from(merged).sort();
+    renderFilesStrip();
+    updateSelectionUI();
+    if (modalFiles && !modalFiles.hidden) closeModal(modalFiles);
+    toast("Добавлено файлов: " + added + ".");
+  } catch (error) {
+    toast(errorText(error, "Не удалось открыть проводник."), "error");
+  } finally {
+    browseBusy = false;
+    fsBrowseEl.disabled = false;
   }
 }
 
@@ -1614,6 +2085,19 @@ function bindCards() {
         printAction(key, "resume");
         return;
       }
+      if (action === "camera") {
+        const record = cards.get(key);
+        closeCardMenus();
+        if (record && record.view && record.view.host) {
+          window.open(cameraUrl(record.view), "_blank", "noopener,noreferrer");
+        }
+        return;
+      }
+      if (action === "rename") {
+        closeCardMenus();
+        openRenameModal("single", key);
+        return;
+      }
       if (action === "cancel-print") {
         const record = cards.get(key);
         const name = record && record.view ? record.view.name || record.view.key : key;
@@ -1624,7 +2108,7 @@ function bindCards() {
         return;
       }
     }
-    const link = target.closest('a[data-field="mainsail"]');
+    const link = target.closest('a[data-field="mainsail"], a[data-field="camera"]');
     if (link && link.getAttribute("aria-disabled") === "true") event.preventDefault();
   });
 }
@@ -1673,6 +2157,13 @@ function init() {
   modalPrinters = document.getElementById("modal-printers");
   modalError = document.getElementById("modal-error");
   modalConfirm = document.getElementById("modal-confirm");
+  modalRename = document.getElementById("modal-rename");
+  renameTitleEl = document.getElementById("modal-rename-title");
+  renameHintEl = document.getElementById("rename-hint");
+  renameInputEl = document.getElementById("rename-input");
+  renamePreviewEl = document.getElementById("rename-preview");
+  renameConfirmEl = document.getElementById("rename-confirm");
+  fsBrowseEl = document.getElementById("fs-browse");
   confirmTextEl = document.getElementById("confirm-text");
   errorTitleEl = document.getElementById("modal-error-title");
   errorLabelEl = document.getElementById("error-label");
@@ -1711,6 +2202,7 @@ function init() {
     });
   }
   bindFilterClicks();
+  bindSummaryClicks();
   bindCards();
   bindDocument();
 
@@ -1742,6 +2234,56 @@ function init() {
       updateSelectionUI();
     });
   }
+  const selectVisibleButton = document.getElementById("select-visible");
+  if (selectVisibleButton) {
+    selectVisibleButton.addEventListener("click", function () {
+      for (const record of cards.values()) {
+        if (matches(record.view)) state.selected.add(record.view.key);
+      }
+      updateSelectionUI();
+    });
+  }
+  const bulkPauseButton = document.getElementById("bulk-pause");
+  if (bulkPauseButton) {
+    bulkPauseButton.addEventListener("click", function () {
+      bulkPrintAction("pause");
+    });
+  }
+  const bulkResumeButton = document.getElementById("bulk-resume");
+  if (bulkResumeButton) {
+    bulkResumeButton.addEventListener("click", function () {
+      bulkPrintAction("resume");
+    });
+  }
+  const bulkCancelButton = document.getElementById("bulk-cancel");
+  if (bulkCancelButton) {
+    bulkCancelButton.addEventListener("click", function () {
+      bulkPrintAction("cancel");
+    });
+  }
+  const bulkRenameButton = document.getElementById("bulk-rename");
+  if (bulkRenameButton) {
+    bulkRenameButton.addEventListener("click", function () {
+      if (!state.selected.size) return;
+      openRenameModal("bulk");
+    });
+  }
+  const groupButton = document.getElementById("group-toggle");
+  if (groupButton) {
+    groupButton.addEventListener("click", function () {
+      applyGrouped(!state.grouped, true);
+    });
+  }
+  if (renameInputEl) {
+    renameInputEl.addEventListener("input", renderRenamePreview);
+    renameInputEl.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      confirmRename();
+    });
+  }
+  if (renameConfirmEl) renameConfirmEl.addEventListener("click", confirmRename);
+  if (fsBrowseEl) fsBrowseEl.addEventListener("click", browseFiles);
   const sendButton = document.getElementById("send");
   if (sendButton) sendButton.addEventListener("click", sendFiles);
   if (cancelJobEl) cancelJobEl.addEventListener("click", cancelJob);
@@ -1812,6 +2354,7 @@ function init() {
   document.addEventListener("keydown", handleKeyboard);
 
   restoreCompact();
+  restoreGrouped();
   renderFilesStrip();
   fetchState();
   loadJournal();
