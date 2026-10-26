@@ -3,8 +3,12 @@
 const POLL_IDLE_MS = 2000;
 const POLL_JOB_MS = 1000;
 const FETCH_TIMEOUT_MS = 5000;
+const API_TIMEOUT_MS = 8000;
+const FS_TIMEOUT_MS = 15000;
 const TOAST_MS = 5000;
+const HEARTBEAT_MS = 10000;
 const COMPACT_KEY = "farm.compact";
+const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
@@ -14,6 +18,11 @@ const STATE_LABELS = {
 };
 const SUMMARY_KEYS = ["printing", "paused", "idle", "error", "offline"];
 const FILTER_KEYS = ["all", "printing", "paused", "idle", "error", "offline"];
+const ACTION_LABELS = {
+  pause: "Пауза включена",
+  resume: "Печать продолжена",
+  cancel: "Печать отменена",
+};
 
 const state = {
   printers: [],
@@ -27,6 +36,9 @@ const state = {
 };
 
 const cards = new Map();
+const actionBusy = new Set();
+const modalStack = [];
+const journalIndexes = new Set();
 let templateEl = null;
 let cardsEl = null;
 let summaryEl = null;
@@ -36,9 +48,63 @@ let toastsEl = null;
 let connEl = null;
 let connTextEl = null;
 let printerCountEl = null;
+let sendEstimateEl = null;
+let cancelJobEl = null;
+let filesCountEl = null;
+let filesNamesEl = null;
+let modalFiles = null;
+let modalPrinters = null;
+let modalError = null;
+let modalConfirm = null;
+let confirmTextEl = null;
+let errorTitleEl = null;
+let errorLabelEl = null;
+let errorCodeEl = null;
+let errorDetailEl = null;
+let errorHintEl = null;
+let errorWikiEl = null;
+let fsListEl = null;
+let fsCrumbsEl = null;
+let fsUpEl = null;
+let fsPreviewImage = null;
+let fsPreviewEmpty = null;
+let fsPreviewNameEl = null;
+let fsSelectedCountEl = null;
+let fsConfirmEl = null;
+let printerListEl = null;
+let printerForm = null;
+let printerKeyEl = null;
+let printerNameEl = null;
+let printerHostEl = null;
+let printerPortEl = null;
+let printerMainsailEl = null;
+let printerDeleteEl = null;
+let printerResetEl = null;
+let printerSubmitEl = null;
+let journalPanel = null;
+let journalEl = null;
+let journalCountEl = null;
+let journalToggleEl = null;
+let journalCloseEl = null;
 let lastErrorToast = 0;
 let pollTimer = 0;
 let inFlight = false;
+let sendBusy = false;
+let lastJobRunning = false;
+let confirmResolve = null;
+let lastFocus = null;
+let journalBusy = false;
+let journalCursor = -1;
+let journalCount = 0;
+let fsPath = "";
+let fsParent = null;
+let fsEntries = [];
+let fsSelected = new Set();
+let fsActive = "";
+let fsRequest = 0;
+let fsPreviewSrc = "";
+let lastFsPath = "";
+let printerItems = [];
 
 function pick(root, selectors) {
   for (const selector of selectors) {
@@ -116,10 +182,96 @@ function formatAgo(timestamp) {
   return Math.round(seconds / 86400) + " дн назад";
 }
 
+function formatClock(value) {
+  if (value === null || value === undefined || value === "") return "";
+  let date = null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && String(value).trim() !== "") {
+    date = new Date(numeric < 1000000000000 ? numeric * 1000 : numeric);
+  } else {
+    date = new Date(String(value));
+  }
+  if (!date || Number.isNaN(date.getTime())) return "";
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return hours + ":" + minutes + ":" + seconds;
+}
+
 function lastSeenText(timestamp) {
   const number = Number(timestamp);
   if (!Number.isFinite(number) || number <= 0) return "нет связи";
   return "последний ответ " + formatAgo(number);
+}
+
+function plural(count, one, few, many) {
+  const number = Math.abs(Number(count) || 0) % 100;
+  const last = number % 10;
+  if (number > 10 && number < 20) return many;
+  if (last === 1) return one;
+  if (last >= 2 && last <= 4) return few;
+  return many;
+}
+
+function baseName(path) {
+  const parts = String(path || "").split(/[\\/]/);
+  const name = parts[parts.length - 1];
+  return name || String(path || "");
+}
+
+function parentPath(path) {
+  const text = String(path || "").replace(/[\\/]+$/, "");
+  if (!text) return null;
+  if (/^[A-Za-z]:$/.test(text)) return "";
+  const index = Math.max(text.lastIndexOf("\\"), text.lastIndexOf("/"));
+  if (index < 0) return null;
+  if (index === 2 && /^[A-Za-z]:/.test(text)) return text.slice(0, 2) + "\\";
+  return text.slice(0, index);
+}
+
+function joinPath(base, name) {
+  const text = String(name || "");
+  if (/^[A-Za-z]:[\\/]?$/.test(text)) return text.slice(0, 2) + "\\";
+  if (!base) return text;
+  const separator = /[\\/]$/.test(base) ? "" : "\\";
+  return base + separator + text;
+}
+
+function crumbParts(path) {
+  const text = String(path || "");
+  const parts = [];
+  if (!text) return parts;
+  if (/^[A-Za-z]:[\\/]/.test(text)) {
+    const drive = text.slice(0, 2);
+    parts.push({ label: drive, path: drive + "\\" });
+    let current = drive + "\\";
+    for (const segment of text.slice(2).split(/[\\/]+/).filter(Boolean)) {
+      current = current + segment;
+      parts.push({ label: segment, path: current });
+      current = current + "\\";
+    }
+    return parts;
+  }
+  if (text.charAt(0) === "/") {
+    parts.push({ label: "/", path: "/" });
+    let current = "";
+    for (const segment of text.slice(1).split("/").filter(Boolean)) {
+      current = current + "/" + segment;
+      parts.push({ label: segment, path: current });
+    }
+    return parts;
+  }
+  let current = "";
+  for (const segment of text.split(/[\\/]+/).filter(Boolean)) {
+    current = current ? current + "\\" + segment : segment;
+    parts.push({ label: segment, path: current });
+  }
+  return parts;
+}
+
+function errorText(error, fallback) {
+  if (error && error.message) return String(error.message);
+  return fallback || "Неизвестная ошибка";
 }
 
 function toast(text, kind) {
@@ -149,6 +301,55 @@ function setConnection(online) {
   setText(connTextEl, online ? "Сервер работает" : "Нет связи");
 }
 
+async function requestJSON(path, options) {
+  const settings = options || {};
+  const controller = new AbortController();
+  const timeoutMs = settings.timeout || API_TIMEOUT_MS;
+  const timeout = window.setTimeout(function () {
+    controller.abort();
+  }, timeoutMs);
+  const method = settings.method || "GET";
+  const init = {
+    method: method,
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+    signal: controller.signal,
+  };
+  if (settings.body !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(settings.body);
+  } else if (method !== "GET") {
+    init.headers["Content-Type"] = "application/json";
+    init.body = "{}";
+  }
+  try {
+    const response = await fetch(path, init);
+    const text = await response.text();
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+    }
+    if (!response.ok) {
+      const message =
+        data && (data.error || data.message)
+          ? String(data.error || data.message)
+          : "Ошибка сервера (HTTP " + response.status + ")";
+      throw new Error(message);
+    }
+    return data;
+  } catch (error) {
+    if (error && error.name === "AbortError") throw new Error("Сервер не ответил вовремя.");
+    if (error instanceof TypeError) throw new Error("Нет связи с сервером.");
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function fetchState() {
   if (inFlight) return;
   inFlight = true;
@@ -170,7 +371,9 @@ async function fetchState() {
     state.job = data.job || {};
     lastErrorToast = 0;
     setConnection(true);
+    noteJobExit();
     render();
+    loadJournal();
   } catch (error) {
     setConnection(false);
     notifyServerError();
@@ -182,9 +385,23 @@ async function fetchState() {
   }
 }
 
+function noteJobExit() {
+  const job = state.job || {};
+  const running = Boolean(job.running);
+  if (lastJobRunning && !running && job.finished) {
+    const ok = Number(job.ok) || 0;
+    const failed = Number(job.failed) || 0;
+    if (job.cancelled) toast("Отправка отменена.", "warn");
+    else if (failed > 0) toast("Отправка завершена. Успешно: " + ok + ", ошибок: " + failed + ".", "error");
+    else toast("Отправка завершена. Успешно: " + ok + ".");
+  }
+  lastJobRunning = running;
+}
+
 function render() {
   renderSummary();
   renderCards();
+  renderJob();
   applyFilters();
   updateSelectionUI();
 }
@@ -298,6 +515,15 @@ function createCard(view) {
     error: field(el, "error") || el.querySelector(".error-banner"),
     errorLabel: field(el, "error-label"),
     errorCode: field(el, "error-code"),
+    upload: field(el, "upload"),
+    uploadLabel: field(el, "upload-label"),
+    uploadBar: field(el, "upload-bar"),
+    uploadPct: field(el, "upload-pct"),
+    mainsail: field(el, "mainsail"),
+    pause: field(el, "pause"),
+    resume: field(el, "resume"),
+    menu: field(el, "menu"),
+    cardMenu: field(el, "card-menu"),
   };
   if (!refs.stateLabel) refs.stateLabel = refs.pill;
   const record = {
@@ -308,15 +534,14 @@ function createCard(view) {
     tagText: refs.lastSeen ? refs.lastSeen.textContent : "",
   };
   if (refs.select) {
+    refs.select.setAttribute("aria-label", "Выбрать принтер " + (view.name || view.key));
     refs.select.addEventListener("change", function () {
       toggleSelect(view.key, refs.select.checked);
     });
   }
   if (refs.error) {
     refs.error.addEventListener("click", function () {
-      if (typeof openErrorModal === "function") {
-        openErrorModal(cards.has(view.key) ? cards.get(view.key).view : view);
-      }
+      openErrorModal(cards.has(view.key) ? cards.get(view.key).view : view);
     });
   }
   cardsEl.appendChild(el);
@@ -371,6 +596,30 @@ function upsertCard(view) {
       setText(refs.errorCode, error && error.code ? error.code : "");
       refs.errorCode.hidden = !(error && error.code);
     }
+  }
+
+  if (refs.mainsail) {
+    const url = typeof view.mainsail_url === "string" ? view.mainsail_url : "";
+    if (/^https?:\/\//i.test(url)) {
+      refs.mainsail.href = url;
+      refs.mainsail.removeAttribute("aria-disabled");
+      refs.mainsail.classList.remove("disabled");
+      refs.mainsail.title = url;
+    } else {
+      refs.mainsail.removeAttribute("href");
+      refs.mainsail.setAttribute("aria-disabled", "true");
+      refs.mainsail.classList.add("disabled");
+      refs.mainsail.title = "Адрес Mainsail неизвестен";
+    }
+  }
+
+  const controllable = status === "printing" || status === "paused";
+  if (refs.pause) refs.pause.hidden = status !== "printing";
+  if (refs.resume) refs.resume.hidden = status !== "paused";
+  if (refs.menu) refs.menu.hidden = !controllable;
+  if (refs.cardMenu && !controllable) {
+    refs.cardMenu.hidden = true;
+    if (refs.menu) refs.menu.setAttribute("aria-expanded", "false");
   }
 
   updateThumb(record, view);
@@ -459,7 +708,69 @@ function updateSelectionUI() {
   if (countNode) setText(countNode, state.selected.size);
   const sendButton = document.getElementById("send") || document.getElementById("send-button");
   if (sendButton) {
-    sendButton.disabled = state.selected.size === 0 || Boolean(state.job && state.job.running);
+    sendButton.disabled =
+      state.selected.size === 0 || sendBusy || Boolean(state.job && state.job.running);
+  }
+  updateSendEstimate();
+}
+
+function updateSendEstimate() {
+  if (!sendEstimateEl) return;
+  const printers = state.selected.size;
+  const sends = printers * state.files.length;
+  setText(
+    sendEstimateEl,
+    "Выбрано " +
+      printers +
+      " " +
+      plural(printers, "принтер", "принтера", "принтеров") +
+      " · " +
+      sends +
+      " " +
+      plural(sends, "отправка", "отправки", "отправок")
+  );
+}
+
+function renderFilesStrip() {
+  const count = state.files.length;
+  if (filesCountEl) setText(filesCountEl, count + " " + plural(count, "файл", "файла", "файлов"));
+  if (filesNamesEl) {
+    if (!count) {
+      setText(filesNamesEl, "Файлы не выбраны");
+      filesNamesEl.title = "";
+    } else {
+      const names = state.files.slice(0, 3).map(baseName);
+      const suffix = count > 3 ? " и ещё " + (count - 3) : "";
+      setText(filesNamesEl, names.join(", ") + suffix);
+      filesNamesEl.title = state.files.join("\n");
+    }
+  }
+  updateSendEstimate();
+}
+
+function renderJob() {
+  const job = state.job && typeof state.job === "object" ? state.job : {};
+  const running = Boolean(job.running);
+  const rows = job.per_printer && typeof job.per_printer === "object" ? job.per_printer : {};
+  for (const [key, record] of cards) {
+    const refs = record.refs;
+    if (!refs.upload) continue;
+    const row = rows[key];
+    const visible = Boolean(row) && running;
+    refs.upload.hidden = !visible;
+    if (!visible) continue;
+    const progress = clamp(row.progress, 0, 100);
+    if (refs.uploadBar) refs.uploadBar.style.width = progress + "%";
+    setText(refs.uploadPct, Math.round(progress) + " %");
+    const error = row.last_error ? String(row.last_error) : "";
+    let label = row.status ? String(row.status) : "Отправка";
+    if (error) label = error.length > 60 ? error.slice(0, 57) + "…" : error;
+    setText(refs.uploadLabel, label);
+    if (refs.uploadLabel) refs.uploadLabel.title = error || label;
+  }
+  if (cancelJobEl) {
+    cancelJobEl.disabled = !running || Boolean(job.cancelling);
+    setText(cancelJobEl, job.cancelling ? "Отмена…" : "Отмена");
   }
 }
 
@@ -497,6 +808,834 @@ function bindFilterClicks() {
   });
 }
 
+function openModal(modal) {
+  if (!modal) return;
+  const index = modalStack.indexOf(modal);
+  if (index === -1) {
+    if (!modalStack.length) {
+      lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    modalStack.push(modal);
+  } else {
+    modalStack.splice(index, 1);
+    modalStack.push(modal);
+  }
+  modal.hidden = false;
+}
+
+function closeModal(modal) {
+  if (!modal) return;
+  modal.hidden = true;
+  const index = modalStack.indexOf(modal);
+  if (index !== -1) modalStack.splice(index, 1);
+  if (modal === modalConfirm && confirmResolve) {
+    const resolve = confirmResolve;
+    confirmResolve = null;
+    resolve(false);
+  }
+  if (!modalStack.length && lastFocus && typeof lastFocus.focus === "function") {
+    lastFocus.focus();
+    lastFocus = null;
+  }
+}
+
+function closeTopModal() {
+  const modal = modalStack[modalStack.length - 1];
+  if (modal) closeModal(modal);
+}
+
+function finishConfirm(value) {
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  closeModal(modalConfirm);
+  if (resolve) resolve(value);
+}
+
+function confirmDialog(text) {
+  if (!modalConfirm) return Promise.resolve(false);
+  if (confirmResolve) {
+    const previous = confirmResolve;
+    confirmResolve = null;
+    previous(false);
+  }
+  setText(confirmTextEl, text || "Вы уверены?");
+  openModal(modalConfirm);
+  const cancel = modalConfirm.querySelector("[data-close]");
+  if (cancel) cancel.focus();
+  return new Promise(function (resolve) {
+    confirmResolve = resolve;
+  });
+}
+
+function closeCardMenus(except) {
+  for (const record of cards.values()) {
+    const refs = record.refs;
+    if (!refs.cardMenu || refs.cardMenu === except) continue;
+    refs.cardMenu.hidden = true;
+    if (refs.menu) refs.menu.setAttribute("aria-expanded", "false");
+  }
+}
+
+function hasOpenCardMenu() {
+  for (const record of cards.values()) {
+    if (record.refs.cardMenu && !record.refs.cardMenu.hidden) return true;
+  }
+  return false;
+}
+
+function toggleCardMenu(key) {
+  const record = cards.get(key);
+  if (!record || !record.refs.cardMenu) return;
+  const open = record.refs.cardMenu.hidden;
+  closeCardMenus(open ? record.refs.cardMenu : null);
+  record.refs.cardMenu.hidden = !open;
+  if (record.refs.menu) record.refs.menu.setAttribute("aria-expanded", String(open));
+}
+
+async function printAction(key, action) {
+  const busyKey = key + ":" + action;
+  if (actionBusy.has(busyKey)) return;
+  actionBusy.add(busyKey);
+  const record = cards.get(key);
+  const button = record ? record.refs[action === "cancel" ? null : action] : null;
+  if (button) button.disabled = true;
+  try {
+    await requestJSON("/api/print/" + encodeURIComponent(key) + "/" + action, {
+      method: "POST",
+      body: {},
+    });
+    const name = record && record.view ? record.view.name || record.view.key : key;
+    toast((ACTION_LABELS[action] || "Готово") + ": " + name);
+    await fetchState();
+  } catch (error) {
+    toast(errorText(error, "Не удалось выполнить действие."), "error");
+  } finally {
+    actionBusy.delete(busyKey);
+    if (button) button.disabled = false;
+  }
+}
+
+function openErrorModal(view) {
+  const error = view && view.error ? view.error : null;
+  setText(errorTitleEl, view && view.name ? "Ошибка · " + view.name : "Ошибка принтера");
+  setText(errorLabelEl, error && error.label ? error.label : "Ошибка принтера");
+  setText(errorCodeEl, error && error.code ? error.code : "—");
+  setText(errorDetailEl, error && error.detail ? error.detail : "—");
+  setText(errorHintEl, error && error.hint ? error.hint : "Откройте Mainsail и проверьте состояние.");
+  const url = error && error.help_url ? String(error.help_url) : "";
+  if (errorWikiEl) {
+    if (/^https?:\/\//i.test(url)) errorWikiEl.href = url;
+    else errorWikiEl.setAttribute("href", DEFAULT_HELP_URL);
+  }
+  openModal(modalError);
+}
+
+async function loadFs(path) {
+  if (!fsListEl) return;
+  const token = fsRequest + 1;
+  fsRequest = token;
+  renderFsMessage("Загрузка…");
+  try {
+    const data = await requestJSON("/api/fs?path=" + encodeURIComponent(path || ""), {
+      timeout: FS_TIMEOUT_MS,
+    });
+    if (token !== fsRequest) return;
+    const current = data && typeof data.path === "string" ? data.path : path || "";
+    fsPath = current;
+    fsEntries = data && Array.isArray(data.entries) ? data.entries.filter(Boolean) : [];
+    if (data && data.parent === null) fsParent = null;
+    else if (data && typeof data.parent === "string") fsParent = data.parent;
+    else fsParent = parentPath(fsPath);
+    lastFsPath = fsPath;
+    renderCrumbs();
+    renderFsList();
+    updateFsFooter();
+    updateFsPreview();
+    focusFirstFsEntry();
+  } catch (error) {
+    if (token !== fsRequest) return;
+    renderFsMessage("Не удалось открыть папку.");
+    toast(errorText(error, "Не удалось открыть папку."), "error");
+  }
+}
+
+function fsIsDir(entry) {
+  return Boolean(entry.is_dir) || entry.type === "dir" || entry.kind === "dir";
+}
+
+function renderFsMessage(text) {
+  if (!fsListEl) return;
+  fsListEl.textContent = "";
+  const item = document.createElement("li");
+  const label = document.createElement("span");
+  label.className = "meta";
+  label.textContent = text;
+  item.appendChild(label);
+  fsListEl.appendChild(item);
+}
+
+function renderFsList() {
+  if (!fsListEl) return;
+  fsListEl.textContent = "";
+  if (!fsEntries.length) {
+    renderFsMessage("Пусто");
+    return;
+  }
+  for (const entry of fsEntries) {
+    const name = entry && entry.name !== undefined ? String(entry.name) : "";
+    if (!name) continue;
+    const isDir = fsIsDir(entry);
+    const path = typeof entry.path === "string" && entry.path ? entry.path : joinPath(fsPath, name);
+    const item = document.createElement("li");
+    item.dataset.path = path;
+    if (isDir) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "dir";
+      button.dataset.nav = path;
+      const icon = document.createElement("span");
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = "▸";
+      const label = document.createElement("span");
+      label.textContent = name;
+      button.appendChild(icon);
+      button.appendChild(label);
+      item.appendChild(button);
+    } else {
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.className = "check";
+      box.checked = fsSelected.has(path);
+      box.setAttribute("aria-label", "Выбрать " + name);
+      box.addEventListener("change", function () {
+        fsSetSelected(path, box.checked);
+      });
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.open = path;
+      const label = document.createElement("span");
+      label.textContent = name;
+      button.appendChild(label);
+      const size = Number(entry.size);
+      if (Number.isFinite(size) && size > 0) {
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = formatBytes(size);
+        button.appendChild(meta);
+      }
+      item.appendChild(box);
+      item.appendChild(button);
+    }
+    item.classList.toggle("active", !isDir && fsActive === path);
+    item.classList.toggle("selected", !isDir && fsSelected.has(path));
+    fsListEl.appendChild(item);
+  }
+}
+
+function renderCrumbs() {
+  if (!fsCrumbsEl) return;
+  fsCrumbsEl.textContent = "";
+  const parts = crumbParts(fsPath);
+  if (!parts.length) {
+    const label = document.createElement("span");
+    label.textContent = "Диски";
+    fsCrumbsEl.appendChild(label);
+  } else {
+    parts.forEach(function (part, index) {
+      if (index > 0) {
+        const separator = document.createElement("span");
+        separator.setAttribute("aria-hidden", "true");
+        separator.textContent = "\\";
+        fsCrumbsEl.appendChild(separator);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.crumb = part.path;
+      button.textContent = part.label;
+      fsCrumbsEl.appendChild(button);
+    });
+  }
+  if (fsUpEl) fsUpEl.disabled = fsParent === null || fsParent === undefined;
+}
+
+function focusFirstFsEntry() {
+  if (!fsListEl || !modalFiles || modalFiles.hidden) return;
+  const button = fsListEl.querySelector("button");
+  if (!button) return;
+  window.setTimeout(function () {
+    if (modalFiles && !modalFiles.hidden) button.focus({ preventScroll: true });
+  }, 0);
+}
+
+function lastSelectedPath() {
+  const values = Array.from(fsSelected);
+  return values.length ? values[values.length - 1] : "";
+}
+
+function fsSetSelected(path, value) {
+  if (value) {
+    fsSelected.add(path);
+    fsActive = path;
+  } else {
+    fsSelected.delete(path);
+    if (fsActive === path) fsActive = lastSelectedPath();
+  }
+  if (fsListEl) {
+    for (const item of fsListEl.children) {
+      const itemPath = item.dataset ? item.dataset.path : "";
+      const selected = fsSelected.has(itemPath);
+      item.classList.toggle("selected", selected);
+      item.classList.toggle("active", itemPath === fsActive);
+      const box = item.querySelector('input[type="checkbox"]');
+      if (box) box.checked = selected;
+    }
+  }
+  updateFsFooter();
+  updateFsPreview();
+}
+
+function updateFsFooter() {
+  if (fsConfirmEl) fsConfirmEl.disabled = fsSelected.size === 0;
+  setText(fsSelectedCountEl, "Выбрано файлов: " + fsSelected.size);
+}
+
+function updateFsPreview() {
+  if (!fsPreviewImage) return;
+  if (!fsActive) {
+    fsPreviewSrc = "";
+    fsPreviewImage.removeAttribute("src");
+    fsPreviewImage.hidden = true;
+    if (fsPreviewEmpty) {
+      fsPreviewEmpty.hidden = false;
+      setText(fsPreviewEmpty, "Файл не выбран");
+    }
+    setText(fsPreviewNameEl, "Выберите файл .gcode");
+    return;
+  }
+  const name = baseName(fsActive);
+  setText(fsPreviewNameEl, name);
+  const src = "/api/files/thumb?path=" + encodeURIComponent(fsActive);
+  if (fsPreviewSrc === src) {
+    if (fsPreviewImage.naturalWidth > 0) {
+      fsPreviewImage.hidden = false;
+      if (fsPreviewEmpty) fsPreviewEmpty.hidden = true;
+    }
+    return;
+  }
+  fsPreviewSrc = src;
+  fsPreviewImage.alt = "Превью " + name;
+  fsPreviewImage.hidden = true;
+  if (fsPreviewEmpty) {
+    fsPreviewEmpty.hidden = false;
+    setText(fsPreviewEmpty, "Загрузка…");
+  }
+  fsPreviewImage.onload = function () {
+    fsPreviewImage.hidden = false;
+    if (fsPreviewEmpty) fsPreviewEmpty.hidden = true;
+  };
+  fsPreviewImage.onerror = function () {
+    fsPreviewImage.hidden = true;
+    if (fsPreviewEmpty) {
+      fsPreviewEmpty.hidden = false;
+      setText(fsPreviewEmpty, "Превью нет");
+    }
+  };
+  fsPreviewImage.src = src;
+}
+
+function openFilesModal() {
+  if (!modalFiles) return;
+  fsSelected = new Set(state.files);
+  fsActive = state.files.length ? state.files[0] : "";
+  let start = lastFsPath;
+  if (!start && state.files.length) {
+    const parent = parentPath(state.files[0]);
+    start = parent || "";
+  }
+  fsPath = start || "";
+  fsEntries = [];
+  fsParent = parentPath(fsPath);
+  fsPreviewSrc = "";
+  openModal(modalFiles);
+  renderCrumbs();
+  updateFsFooter();
+  updateFsPreview();
+  loadFs(fsPath);
+}
+
+function confirmFiles() {
+  if (!fsSelected.size) return;
+  state.files = Array.from(fsSelected).sort();
+  lastFsPath = fsPath;
+  renderFilesStrip();
+  updateSelectionUI();
+  closeModal(modalFiles);
+  toast("Выбрано файлов: " + state.files.length);
+}
+
+function normalizePrinter(item) {
+  if (!item || typeof item !== "object") return null;
+  let key = typeof item.key === "string" ? item.key : "";
+  let host = typeof item.host === "string" ? item.host : "";
+  let port = Number(item.port);
+  if (!Number.isFinite(port) || port <= 0) {
+    const match = key.match(/:(\d+)$/);
+    port = match ? Number(match[1]) : 7125;
+  }
+  if (!host && key) {
+    const index = key.lastIndexOf(":");
+    if (index > 0) host = key.slice(0, index);
+  }
+  if (!key) key = host + ":" + port;
+  let mainsail = Number(item.mainsail_port);
+  if (!Number.isFinite(mainsail) || mainsail <= 0) {
+    const match = String(item.mainsail_url || "").match(/:(\d+)\/?$/);
+    mainsail = match ? Number(match[1]) : 4408;
+  }
+  return {
+    key: key,
+    name: String(item.name || key),
+    host: host,
+    port: port,
+    mainsail_port: mainsail,
+  };
+}
+
+function markActivePrinter() {
+  if (!printerListEl) return;
+  const activeKey = printerKeyEl ? printerKeyEl.value : "";
+  for (const item of printerListEl.children) {
+    item.classList.toggle("active", Boolean(activeKey) && item.dataset.key === activeKey);
+  }
+}
+
+function renderPrinterList() {
+  if (!printerListEl) return;
+  printerListEl.textContent = "";
+  for (const printer of printerItems) {
+    const item = document.createElement("li");
+    item.dataset.key = printer.key;
+    const who = document.createElement("div");
+    who.className = "who";
+    const name = document.createElement("b");
+    name.textContent = printer.name;
+    const details = document.createElement("small");
+    details.textContent = printer.host + ":" + printer.port + " · Mainsail " + printer.mainsail_port;
+    who.appendChild(name);
+    who.appendChild(details);
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "btn ghost";
+    edit.dataset.key = printer.key;
+    edit.textContent = "Изменить";
+    item.appendChild(who);
+    item.appendChild(edit);
+    printerListEl.appendChild(item);
+  }
+  markActivePrinter();
+}
+
+async function refreshPrinterList(quiet) {
+  if (!printerListEl) return;
+  try {
+    const data = await requestJSON("/api/printers", { timeout: 6000 });
+    const list = Array.isArray(data)
+      ? data
+      : data && Array.isArray(data.printers)
+        ? data.printers
+        : [];
+    printerItems = list.map(normalizePrinter).filter(Boolean);
+    renderPrinterList();
+  } catch (error) {
+    printerItems = state.printers.map(normalizePrinter).filter(Boolean);
+    renderPrinterList();
+    if (!quiet) toast(errorText(error, "Не удалось загрузить принтеры."), "error");
+  }
+}
+
+function resetPrinterForm() {
+  if (!printerForm) return;
+  printerForm.reset();
+  if (printerKeyEl) printerKeyEl.value = "";
+  if (printerDeleteEl) printerDeleteEl.hidden = true;
+  markActivePrinter();
+}
+
+function fillPrinterForm(printer) {
+  if (!printer || !printerForm) return;
+  if (printerKeyEl) printerKeyEl.value = printer.key;
+  if (printerNameEl) printerNameEl.value = printer.name;
+  if (printerHostEl) printerHostEl.value = printer.host;
+  if (printerPortEl) printerPortEl.value = String(printer.port);
+  if (printerMainsailEl) printerMainsailEl.value = String(printer.mainsail_port);
+  if (printerDeleteEl) printerDeleteEl.hidden = false;
+  markActivePrinter();
+  if (printerNameEl) printerNameEl.focus();
+}
+
+function openPrintersModal() {
+  if (!modalPrinters) return;
+  resetPrinterForm();
+  openModal(modalPrinters);
+  refreshPrinterList(false);
+  if (printerNameEl) {
+    window.setTimeout(function () {
+      if (modalPrinters && !modalPrinters.hidden) printerNameEl.focus();
+    }, 0);
+  }
+}
+
+function validPort(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 1 && number <= 65535;
+}
+
+async function savePrinter(event) {
+  if (event) event.preventDefault();
+  if (!printerForm) return;
+  if (!printerForm.reportValidity()) return;
+  const name = printerNameEl ? printerNameEl.value.trim() : "";
+  const host = printerHostEl ? printerHostEl.value.trim() : "";
+  const port = printerPortEl ? Number(printerPortEl.value) : 0;
+  const mainsail = printerMainsailEl ? Number(printerMainsailEl.value) : 0;
+  if (!name || !host) {
+    toast("Укажите имя и адрес принтера.", "warn");
+    return;
+  }
+  if (!validPort(port) || !validPort(mainsail)) {
+    toast("Порт должен быть от 1 до 65535.", "warn");
+    return;
+  }
+  const oldKey = printerKeyEl ? printerKeyEl.value.trim() : "";
+  const body = { name: name, host: host, port: port, mainsail_port: mainsail };
+  const path = oldKey ? "/api/printers/" + encodeURIComponent(oldKey) : "/api/printers";
+  const method = oldKey ? "PUT" : "POST";
+  if (printerSubmitEl) printerSubmitEl.disabled = true;
+  try {
+    await requestJSON(path, { method: method, body: body });
+    const newKey = host + ":" + port;
+    if (oldKey && oldKey !== newKey && state.selected.has(oldKey)) {
+      state.selected.delete(oldKey);
+      state.selected.add(newKey);
+      updateSelectionUI();
+    }
+    toast(oldKey ? "Принтер сохранён." : "Принтер добавлен.");
+    resetPrinterForm();
+    await refreshPrinterList(true);
+    await fetchState();
+  } catch (error) {
+    toast(errorText(error, "Не удалось сохранить принтер."), "error");
+  } finally {
+    if (printerSubmitEl) printerSubmitEl.disabled = false;
+  }
+}
+
+async function deletePrinter() {
+  if (!printerKeyEl) return;
+  const key = printerKeyEl.value.trim();
+  if (!key) return;
+  const name = printerNameEl ? printerNameEl.value.trim() || key : key;
+  const confirmed = await confirmDialog("Удалить принтер «" + name + "»?");
+  if (!confirmed) return;
+  if (printerDeleteEl) printerDeleteEl.disabled = true;
+  try {
+    await requestJSON("/api/printers/" + encodeURIComponent(key), { method: "DELETE", body: {} });
+    state.selected.delete(key);
+    updateSelectionUI();
+    toast("Принтер удалён.");
+    resetPrinterForm();
+    await refreshPrinterList(true);
+    await fetchState();
+  } catch (error) {
+    toast(errorText(error, "Не удалось удалить принтер."), "error");
+  } finally {
+    if (printerDeleteEl) printerDeleteEl.disabled = false;
+  }
+}
+
+async function sendFiles() {
+  if (sendBusy) return;
+  if (!state.selected.size) {
+    toast("Выберите принтеры.", "warn");
+    return;
+  }
+  if (!state.files.length) {
+    toast("Сначала выберите файлы .gcode.", "warn");
+    openFilesModal();
+    return;
+  }
+  if (state.job && state.job.running) {
+    toast("Отправка уже идёт.", "warn");
+    return;
+  }
+  sendBusy = true;
+  updateSelectionUI();
+  try {
+    await requestJSON("/api/send", {
+      method: "POST",
+      body: { printers: Array.from(state.selected), files: state.files.slice() },
+    });
+    toast(
+      "Отправка запущена: " +
+        state.files.length +
+        " " +
+        plural(state.files.length, "файл", "файла", "файлов") +
+        " × " +
+        state.selected.size
+    );
+    await fetchState();
+  } catch (error) {
+    toast(errorText(error, "Не удалось начать отправку."), "error");
+  } finally {
+    sendBusy = false;
+    updateSelectionUI();
+  }
+}
+
+async function cancelJob() {
+  if (!state.job || !state.job.running) {
+    toast("Нет активной отправки.", "warn");
+    return;
+  }
+  if (cancelJobEl) cancelJobEl.disabled = true;
+  try {
+    await requestJSON("/api/job/cancel", { method: "POST", body: {} });
+    toast("Отмена запрошена.", "warn");
+    await fetchState();
+  } catch (error) {
+    toast(errorText(error, "Не удалось отменить отправку."), "error");
+  } finally {
+    renderJob();
+  }
+}
+
+function journalPayload(data) {
+  if (Array.isArray(data)) return { entries: data, cursor: null };
+  if (!data || typeof data !== "object") return { entries: [], cursor: null };
+  const entries = Array.isArray(data.events)
+    ? data.events
+    : Array.isArray(data.items)
+      ? data.items
+      : Array.isArray(data.entries)
+        ? data.entries
+        : [];
+  let cursor = null;
+  for (const name of ["next", "last_index", "lastIndex", "cursor", "since"]) {
+    const value = Number(data[name]);
+    if (Number.isFinite(value)) {
+      cursor = value;
+      break;
+    }
+  }
+  return { entries: entries, cursor: cursor };
+}
+
+function journalIndex(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  for (const name of ["index", "id", "seq", "n", "number"]) {
+    const value = Number(entry[name]);
+    if (Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function journalText(entry) {
+  if (typeof entry === "string") return entry;
+  if (!entry || typeof entry !== "object") return "Событие";
+  for (const name of ["text", "message", "msg", "detail", "event"]) {
+    const value = entry[name];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "Событие";
+}
+
+function journalLevel(entry) {
+  const raw =
+    entry && typeof entry === "object"
+      ? String(entry.level || entry.kind || entry.status || entry.type || "").toLowerCase()
+      : "";
+  const text = journalText(entry).toLowerCase();
+  if (/error|failed|ошибка|сбой/.test(raw) || /ошибка|сбой|failed|error/.test(text)) return "error";
+  if (/warn|warning|предупр/.test(raw) || /предупр/.test(text)) return "warn";
+  if (/ok|success|done|готово|успешн/.test(raw) || /готово|успешн/.test(text)) return "ok";
+  return "";
+}
+
+function journalTime(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  return formatClock(entry.time ?? entry.ts ?? entry.timestamp ?? entry.at);
+}
+
+async function loadJournal() {
+  if (!journalEl || journalBusy) return;
+  journalBusy = true;
+  const atBottom = journalEl.scrollHeight - journalEl.scrollTop - journalEl.clientHeight <= 48;
+  try {
+    const data = await requestJSON("/api/journal?since=" + journalCursor, { timeout: 6000 });
+    const payload = journalPayload(data);
+    let added = 0;
+    let unindexed = 0;
+    for (const entry of payload.entries) {
+      const index = journalIndex(entry);
+      if (index !== null) {
+        if (journalIndexes.has(index)) continue;
+        journalIndexes.add(index);
+        if (index > journalCursor) journalCursor = index;
+      } else {
+        unindexed += 1;
+      }
+      const item = document.createElement("li");
+      const stamp = journalTime(entry);
+      if (stamp) {
+        const time = document.createElement("time");
+        time.textContent = stamp;
+        item.appendChild(time);
+      }
+      const label = document.createElement("span");
+      const level = journalLevel(entry);
+      if (level) label.className = level;
+      label.textContent = journalText(entry);
+      item.appendChild(label);
+      journalEl.appendChild(item);
+      added += 1;
+    }
+    if (payload.cursor !== null && payload.cursor > journalCursor) journalCursor = payload.cursor;
+    else if (payload.cursor === null && unindexed) journalCursor += unindexed;
+    journalCount += added;
+    setText(journalCountEl, journalCount);
+    if (added && !journalPanel.hidden && atBottom) journalEl.scrollTop = journalEl.scrollHeight;
+  } catch (error) {
+    journalBusy = false;
+    return;
+  }
+  journalBusy = false;
+}
+
+function setJournalOpen(value) {
+  if (!journalPanel) return;
+  const open = typeof value === "boolean" ? value : journalPanel.hidden;
+  journalPanel.hidden = !open;
+  if (journalToggleEl) journalToggleEl.setAttribute("aria-expanded", String(open));
+  if (open) {
+    loadJournal();
+    if (journalEl) journalEl.scrollTop = journalEl.scrollHeight;
+  }
+}
+
+async function heartbeat() {
+  try {
+    await requestJSON("/api/heartbeat", { method: "POST", body: {}, timeout: 4000 });
+  } catch {}
+}
+
+function handleKeyboard(event) {
+  const target = event.target;
+  const typing =
+    target instanceof Element &&
+    Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+  if (event.key === "Escape") {
+    if (modalStack.length) {
+      event.preventDefault();
+      closeTopModal();
+      return;
+    }
+    if (hasOpenCardMenu()) {
+      event.preventDefault();
+      closeCardMenus();
+      return;
+    }
+    if (journalPanel && !journalPanel.hidden) {
+      event.preventDefault();
+      setJournalOpen(false);
+    }
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    if (!modalStack.length) sendFiles();
+    return;
+  }
+  if (typing || modalStack.length) return;
+  if (event.key === "/" || event.code === "Slash") {
+    event.preventDefault();
+    if (searchEl) searchEl.focus();
+    return;
+  }
+  if (event.code === "KeyC" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    applyCompact(!state.compact, true);
+    return;
+  }
+  if (event.code === "KeyJ" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    setJournalOpen(journalPanel ? !journalPanel.hidden : true);
+  }
+}
+
+function bindCards() {
+  if (!cardsEl) return;
+  cardsEl.addEventListener("click", function (event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    const card = target.closest(".card");
+    const key = card ? card.dataset.key : "";
+    if (!key) return;
+    const actionEl = target.closest("[data-action]");
+    if (actionEl) {
+      const action = actionEl.dataset.action;
+      if (action === "menu") {
+        event.preventDefault();
+        toggleCardMenu(key);
+        return;
+      }
+      if (action === "pause") {
+        printAction(key, "pause");
+        return;
+      }
+      if (action === "resume") {
+        printAction(key, "resume");
+        return;
+      }
+      if (action === "cancel-print") {
+        const record = cards.get(key);
+        const name = record && record.view ? record.view.name || record.view.key : key;
+        closeCardMenus();
+        confirmDialog("Отменить печать на " + name + "? Текущий файл будет остановлен.").then(function (ok) {
+          if (ok) printAction(key, "cancel");
+        });
+        return;
+      }
+    }
+    const link = target.closest('a[data-field="mainsail"]');
+    if (link && link.getAttribute("aria-disabled") === "true") event.preventDefault();
+  });
+}
+
+function bindDocument() {
+  document.addEventListener("click", function (event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    const closer = target.closest("[data-close]");
+    if (closer) {
+      const modal = closer.closest(".modal");
+      if (modal === modalConfirm) finishConfirm(false);
+      else if (modal) closeModal(modal);
+      return;
+    }
+    if (target.classList.contains("modal")) {
+      if (target === modalConfirm) finishConfirm(false);
+      else closeModal(target);
+      return;
+    }
+    const emptyAction = target.closest('#cards-empty [data-action="open-printers"]');
+    if (emptyAction) {
+      openPrintersModal();
+      return;
+    }
+    if (!target.closest('[data-action="menu"]') && !target.closest(".card-menu")) closeCardMenus();
+  });
+}
+
 function init() {
   templateEl = document.getElementById("card-template");
   cardsEl = document.getElementById("cards");
@@ -507,6 +1646,44 @@ function init() {
   connEl = document.getElementById("conn");
   connTextEl = document.getElementById("conn-text");
   printerCountEl = document.getElementById("printer-count");
+  sendEstimateEl = document.getElementById("send-estimate");
+  cancelJobEl = document.getElementById("cancel-job");
+  filesCountEl = document.getElementById("files-count");
+  filesNamesEl = document.getElementById("files-names");
+  modalFiles = document.getElementById("modal-files");
+  modalPrinters = document.getElementById("modal-printers");
+  modalError = document.getElementById("modal-error");
+  modalConfirm = document.getElementById("modal-confirm");
+  confirmTextEl = document.getElementById("confirm-text");
+  errorTitleEl = document.getElementById("modal-error-title");
+  errorLabelEl = document.getElementById("error-label");
+  errorCodeEl = document.getElementById("error-code");
+  errorDetailEl = document.getElementById("error-detail");
+  errorHintEl = document.getElementById("error-hint");
+  errorWikiEl = document.getElementById("error-wiki");
+  fsListEl = document.getElementById("fs-list");
+  fsCrumbsEl = document.getElementById("fs-crumbs");
+  fsUpEl = document.getElementById("fs-up");
+  fsPreviewImage = document.getElementById("fs-preview-image");
+  fsPreviewEmpty = document.getElementById("fs-preview-empty");
+  fsPreviewNameEl = document.getElementById("fs-preview-name");
+  fsSelectedCountEl = document.getElementById("fs-selected-count");
+  fsConfirmEl = document.getElementById("fs-confirm");
+  printerListEl = document.getElementById("printer-list");
+  printerForm = document.getElementById("printer-form");
+  printerKeyEl = document.getElementById("printer-key");
+  printerNameEl = document.getElementById("printer-name");
+  printerHostEl = document.getElementById("printer-host");
+  printerPortEl = document.getElementById("printer-port");
+  printerMainsailEl = document.getElementById("printer-mainsail-port");
+  printerDeleteEl = document.getElementById("printer-delete");
+  printerResetEl = document.getElementById("printer-reset");
+  printerSubmitEl = printerForm ? printerForm.querySelector('button[type="submit"]') : null;
+  journalPanel = document.getElementById("journal-panel");
+  journalEl = document.getElementById("journal");
+  journalCountEl = document.getElementById("journal-count");
+  journalToggleEl = document.getElementById("journal-toggle");
+  journalCloseEl = document.getElementById("journal-close");
 
   if (searchEl) {
     searchEl.addEventListener("input", function () {
@@ -515,6 +1692,8 @@ function init() {
     });
   }
   bindFilterClicks();
+  bindCards();
+  bindDocument();
 
   const compactButton = document.getElementById("compact-toggle");
   if (compactButton) {
@@ -528,8 +1707,97 @@ function init() {
       fetchState();
     });
   }
+  const selectOnlineButton = document.getElementById("select-online");
+  if (selectOnlineButton) {
+    selectOnlineButton.addEventListener("click", function () {
+      for (const view of state.printers) {
+        if (view && view.key && view.state !== "offline") state.selected.add(view.key);
+      }
+      updateSelectionUI();
+    });
+  }
+  const clearSelectionButton = document.getElementById("clear-selection");
+  if (clearSelectionButton) {
+    clearSelectionButton.addEventListener("click", function () {
+      state.selected.clear();
+      updateSelectionUI();
+    });
+  }
+  const sendButton = document.getElementById("send");
+  if (sendButton) sendButton.addEventListener("click", sendFiles);
+  if (cancelJobEl) cancelJobEl.addEventListener("click", cancelJob);
+  const openFilesButton = document.getElementById("open-files");
+  if (openFilesButton) openFilesButton.addEventListener("click", openFilesModal);
+  const openPrintersButton = document.getElementById("open-printers");
+  if (openPrintersButton) openPrintersButton.addEventListener("click", openPrintersModal);
+
+  if (fsUpEl) {
+    fsUpEl.addEventListener("click", function () {
+      loadFs(fsParent === null || fsParent === undefined ? "" : fsParent);
+    });
+  }
+  if (fsCrumbsEl) {
+    fsCrumbsEl.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target ? target.closest("button[data-crumb]") : null;
+      if (button) loadFs(button.dataset.crumb || "");
+    });
+  }
+  if (fsListEl) {
+    fsListEl.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const nav = target.closest("button[data-nav]");
+      if (nav) {
+        loadFs(nav.dataset.nav || "");
+        return;
+      }
+      const open = target.closest("button[data-open]");
+      if (open) {
+        const path = open.dataset.open || "";
+        fsSetSelected(path, !fsSelected.has(path));
+      }
+    });
+  }
+  if (fsConfirmEl) fsConfirmEl.addEventListener("click", confirmFiles);
+
+  if (printerForm) printerForm.addEventListener("submit", savePrinter);
+  if (printerResetEl) printerResetEl.addEventListener("click", resetPrinterForm);
+  if (printerDeleteEl) printerDeleteEl.addEventListener("click", deletePrinter);
+  if (printerListEl) {
+    printerListEl.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target ? target.closest("button[data-key]") : null;
+      if (!button) return;
+      const printer = printerItems.find(function (item) {
+        return item.key === button.dataset.key;
+      });
+      if (printer) fillPrinterForm(printer);
+    });
+  }
+
+  if (journalToggleEl) {
+    journalToggleEl.addEventListener("click", function () {
+      setJournalOpen(journalPanel ? journalPanel.hidden : true);
+    });
+  }
+  if (journalCloseEl) journalCloseEl.addEventListener("click", function () {
+    setJournalOpen(false);
+  });
+
+  const confirmOk = document.getElementById("confirm-ok");
+  if (confirmOk) confirmOk.addEventListener("click", function () {
+    finishConfirm(true);
+  });
+
+  document.addEventListener("keydown", handleKeyboard);
+
   restoreCompact();
+  renderFilesStrip();
   fetchState();
+  loadJournal();
+  heartbeat();
+  window.setInterval(heartbeat, HEARTBEAT_MS);
 }
 
 if (document.readyState === "loading") {
