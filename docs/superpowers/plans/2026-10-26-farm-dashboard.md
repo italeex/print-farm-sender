@@ -611,7 +611,7 @@ git commit -m "feat: printer view model and farm summary"
 - Create: `tests/fake_moonraker.py`
 
 **Interfaces:**
-- Produces: `FarmMonitor(config, *, thumb_cache, interval=None, clock=time.time)`, методы `start()`, `stop()`, `set_printers(printers)`, `poll_once()`, `snapshot() -> dict`, `refresh()`.
+- Produces: `FarmMonitor(config, *, thumb_cache, interval=None, clock=time.time)`, методы `start()`, `stop()`, `set_printers(printers)`, `poll_once()`, `snapshot() -> dict`, `refresh()`, свойство `running -> bool`.
 - Consumes: `build_view`, `summarize`, `ThumbCache`, `thumbnail_from_http`, `parse_error`, `extract_log_error`, `AppConfig`.
 
 - [ ] **Step 1: Написать падающие тесты**
@@ -632,6 +632,8 @@ class FakeMoonraker:
     def stop(self): ...
     def base_url(self): ...
     def request_count(self, path_prefix): ...
+    @property
+    def request_paths(self): ...
 ```
 
 Обслуживает `GET /printer/info`, `/printer/objects/query`, `/server/files/gcodes/<name>` (206, PNG), `/server/files/logs/klippy.log` (206), а также `POST /printer/print/*`.
