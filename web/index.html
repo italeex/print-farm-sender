@@ -44,11 +44,11 @@
   </header>
 
   <section class="summary" id="summary" aria-label="Сводка по ферме">
-    <div class="stat printing" data-stat="printing"><span class="dot"></span><div><b data-stat-value>0</b><small>печатают</small></div></div>
-    <div class="stat paused" data-stat="paused"><span class="dot"></span><div><b data-stat-value>0</b><small>на паузе</small></div></div>
-    <div class="stat idle" data-stat="idle"><span class="dot"></span><div><b data-stat-value>0</b><small>свободны</small></div></div>
-    <div class="stat error" data-stat="error"><span class="dot"></span><div><b data-stat-value>0</b><small>ошибки</small></div></div>
-    <div class="stat offline" data-stat="offline"><span class="dot"></span><div><b data-stat-value>0</b><small>не в сети</small></div></div>
+    <button class="stat printing" type="button" data-stat="printing" data-filter="printing" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>печатают</small></div></button>
+    <button class="stat paused" type="button" data-stat="paused" data-filter="paused" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>на паузе</small></div></button>
+    <button class="stat idle" type="button" data-stat="idle" data-filter="idle" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>свободны</small></div></button>
+    <button class="stat error" type="button" data-stat="error" data-filter="error" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>ошибки</small></div></button>
+    <button class="stat offline" type="button" data-stat="offline" data-filter="offline" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>не в сети</small></div></button>
     <div class="stat farm" data-stat="farm"><div><b data-stat-value>—</b><small>до ближайшего финиша</small></div></div>
   </section>
 
@@ -73,6 +73,17 @@
     </button>
     <button class="btn danger" id="cancel-job" type="button" disabled>Отмена</button>
   </section>
+
+  <div class="bulkbar" id="bulk-actions" role="group" aria-label="Массовые действия">
+    <button class="btn ghost" id="select-visible" type="button">Выбрать видимые</button>
+    <span class="sep" aria-hidden="true"></span>
+    <button class="btn ghost" id="bulk-pause" type="button" disabled>Пауза</button>
+    <button class="btn ghost" id="bulk-resume" type="button" disabled>Продолжить</button>
+    <button class="btn danger" id="bulk-cancel" type="button" disabled>Стоп</button>
+    <button class="btn ghost" id="bulk-rename" type="button" disabled>Переименовать</button>
+    <span class="spacer"></span>
+    <button class="btn ghost" id="group-toggle" type="button" aria-pressed="false">Группировать</button>
+  </div>
 
   <div class="files" id="files-strip">
     <span class="badge" id="files-count">0 файлов</span>
@@ -114,6 +125,7 @@
     <div class="modal-body">
       <div class="fs-toolbar">
         <button class="btn ghost" id="fs-up" type="button">Вверх</button>
+        <button class="btn ghost" id="fs-browse" type="button">Обзор…</button>
         <nav class="crumbs" id="fs-crumbs" aria-label="Текущий путь"></nav>
       </div>
       <div class="fs-split">
@@ -222,6 +234,28 @@
   </div>
 </div>
 
+<div class="modal" id="modal-rename" role="dialog" aria-modal="true" aria-labelledby="modal-rename-title" hidden>
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2 id="modal-rename-title">Переименовать</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="rename-hint" id="rename-hint">Новое имя для принтера.</p>
+      <div class="field rename-field">
+        <label for="rename-input">Имя</label>
+        <input id="rename-input" type="text" required maxlength="60" autocomplete="off" spellcheck="false" placeholder="Например, K2 Plus 01">
+      </div>
+      <p class="rename-preview" id="rename-preview" aria-live="polite"></p>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close>Отмена</button>
+      <button class="btn primary" id="rename-confirm" type="button">Сохранить</button>
+    </footer>
+  </div>
+</div>
+
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <template id="card-template">
@@ -272,11 +306,17 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
           Mainsail
         </a>
+        <a class="link-btn camera-link" data-field="camera" target="_blank" rel="noopener noreferrer" aria-disabled="true">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 10.5 21 7v10l-6-3.5"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
+          Камера
+        </a>
         <button class="mini" type="button" data-action="pause" data-field="pause" aria-label="Пауза" title="Пауза" hidden>⏸</button>
         <button class="mini" type="button" data-action="resume" data-field="resume" aria-label="Продолжить" title="Продолжить" hidden>▶</button>
         <button class="mini" type="button" data-action="menu" data-field="menu" aria-label="Действия с принтером" title="Действия" aria-expanded="false">•••</button>
       </div>
       <div class="card-menu" data-field="card-menu" hidden>
+        <button type="button" data-action="rename">Переименовать</button>
+        <button type="button" data-action="camera">Открыть камеру</button>
         <button type="button" data-action="cancel-print">Отменить печать</button>
       </div>
     </div>
