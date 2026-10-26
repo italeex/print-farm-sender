@@ -190,7 +190,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-vis
   transform: translateY(-3px); border-color: #2c3446;
   background: linear-gradient(180deg, rgba(255, 255, 255, .03), transparent 38%), var(--card-hover);
 }
-.card.offline { opacity: .72; filter: saturate(.75); }
+.card.offline { filter: saturate(.55); border-color: #262d3b; }
+.card.offline .thumb { opacity: .6; }
 .card.offline:hover { transform: none; }
 .card.offline .pill.offline { color: #c3cbd9; }
 .card.selected { border-color: #34496f; box-shadow: 0 0 0 1px rgba(91, 140, 255, .15), var(--shadow); }
