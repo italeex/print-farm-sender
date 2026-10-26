@@ -21,6 +21,7 @@ def make_view(state, **kwargs):
         "host": "192.168.7.158",
         "port": 7125,
         "mainsail_url": "http://192.168.7.158:4408",
+        "mainsail_port": 4408,
         "online": True,
         "state": state,
         "file": "",
@@ -28,6 +29,7 @@ def make_view(state, **kwargs):
         "layer": 0,
         "layer_total": 0,
         "eta_seconds": None,
+        "finish_at": None,
         "nozzle": 0.0,
         "bed": 0.0,
         "filament": "",
@@ -62,9 +64,45 @@ class BuildViewTests(unittest.TestCase):
         self.assertEqual(view.progress, 0.4)
         self.assertEqual((view.layer, view.layer_total), (51, 310))
         self.assertEqual(view.eta_seconds, 300)
+        self.assertEqual(view.finish_at, 1000)
         self.assertEqual((view.nozzle, view.bed), (250.4, 74.2))
         self.assertEqual(view.filament, "PETG")
         self.assertEqual(view.mainsail_url, "http://192.168.7.158:4408")
+        self.assertEqual(view.mainsail_port, 4408)
+
+    def test_eta_from_estimated_time(self):
+        status = {
+            "print_stats": {"state": "printing", "print_duration": 400},
+            "virtual_sdcard": {
+                "progress": 0.4,
+                "cur_print_data": {"end_time": 0, "metadata": {"estimated_time": 1000}},
+            },
+        }
+        view = build_view(self.printer, info=self.info, status=status, now=100, error=None, thumb_version="")
+        self.assertEqual(view.eta_seconds, 600)
+        self.assertEqual(view.finish_at, 700)
+
+    def test_eta_from_progress(self):
+        status = {
+            "print_stats": {"state": "printing", "print_duration": 100},
+            "virtual_sdcard": {"progress": 0.5, "cur_print_data": {}},
+        }
+        view = build_view(self.printer, info=self.info, status=status, now=100, error=None, thumb_version="")
+        self.assertEqual(view.eta_seconds, 100)
+        self.assertEqual(view.finish_at, 200)
+
+    def test_paused_has_no_finish(self):
+        status = {
+            "print_stats": {"state": "paused"},
+            "virtual_sdcard": {
+                "progress": 0.5,
+                "cur_print_data": {"end_time": 9999, "metadata": {"estimated_time": 500}},
+            },
+        }
+        view = build_view(self.printer, info=self.info, status=status, now=1, error=None, thumb_version="")
+        self.assertEqual(view.state, "paused")
+        self.assertIsNone(view.eta_seconds)
+        self.assertIsNone(view.finish_at)
 
     def test_paused_and_complete_mapping(self):
         paused = build_view(self.printer, info=self.info, status={"print_stats": {"state": "paused", "filename": "a.gcode"}}, now=1, error=None, thumb_version="")
@@ -90,6 +128,7 @@ class BuildViewTests(unittest.TestCase):
         status = {"print_stats": {"state": "paused"}, "virtual_sdcard": {"cur_print_data": {"end_time": 9999}}}
         view = build_view(self.printer, info=self.info, status=status, now=1, error=None, thumb_version="")
         self.assertIsNone(view.eta_seconds)
+        self.assertIsNone(view.finish_at)
 
 
 class SummaryTests(unittest.TestCase):

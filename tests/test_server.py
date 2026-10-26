@@ -209,6 +209,7 @@ class ApiTests(unittest.TestCase):
             host="127.0.0.1",
             port=self.moonraker.port,
             mainsail_url="http://127.0.0.1:4408",
+            mainsail_port=4408,
             online=True,
             state="printing",
             file="деталь.gcode",
@@ -216,6 +217,7 @@ class ApiTests(unittest.TestCase):
             layer=51,
             layer_total=310,
             eta_seconds=120,
+            finish_at=1000,
             nozzle=250.4,
             bed=74.2,
             filament="PETG",
@@ -224,7 +226,19 @@ class ApiTests(unittest.TestCase):
             last_seen=0.0,
         )
         self.monitor = StubMonitor(view)
-        self.app = FarmApp(config_path=self.config_path, monitor=self.monitor, start_monitor=False)
+        self.browse_result = []
+        self.browse_calls = []
+
+        def browse_stub(initial_dir):
+            self.browse_calls.append(initial_dir)
+            return self.browse_result
+
+        self.app = FarmApp(
+            config_path=self.config_path,
+            monitor=self.monitor,
+            start_monitor=False,
+            browse_files=browse_stub,
+        )
         self.addCleanup(self.app.job.cancel)
         self.gcode = Path(self.tmp.name) / "part.gcode"
         self.gcode.write_bytes(gcode_with_thumb(PNG_BYTES))
@@ -273,6 +287,61 @@ class ApiTests(unittest.TestCase):
         response = requests.get(self.url("/api/fs?path=%00"), timeout=3)
         self.assertEqual(response.status_code, 400)
         self.assertIn("Некорректный путь", response.json()["error"])
+
+    def test_fs_browse_returns_paths(self):
+        self.browse_result = [str(self.gcode)]
+        response = requests.post(
+            self.url("/api/fs/browse"),
+            json={"initial_dir": self.tmp.name},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["paths"], [str(self.gcode.resolve())])
+        self.assertEqual(self.browse_calls, [self.tmp.name])
+
+    def test_fs_browse_filters_non_gcode(self):
+        missing = Path(self.tmp.name) / "missing.gcode"
+        self.browse_result = [
+            str(self.gcode),
+            str(Path(self.tmp.name) / "notes.txt"),
+            str(missing),
+        ]
+        response = requests.post(
+            self.url("/api/fs/browse"),
+            json={"initial_dir": self.tmp.name},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["paths"], [str(self.gcode.resolve())])
+
+    def test_fs_browse_rejects_bad_body(self):
+        bad_json = requests.post(
+            self.url("/api/fs/browse"),
+            data=b"{",
+            headers={"Content-Type": "application/json"},
+            timeout=3,
+        )
+        self.assertEqual(bad_json.status_code, 400)
+        bad_type = requests.post(
+            self.url("/api/fs/browse"),
+            json={"initial_dir": 5},
+            timeout=3,
+        )
+        self.assertEqual(bad_type.status_code, 400)
+
+    def test_fs_browse_reports_dialog_error(self):
+        def broken(initial_dir):
+            raise RuntimeError("tk недоступен")
+
+        self.app.browse_files = broken
+        with self.assertLogs("farm_server", level="WARNING"):
+            response = requests.post(
+                self.url("/api/fs/browse"),
+                json={"initial_dir": self.tmp.name},
+                timeout=3,
+            )
+        self.assertEqual(response.status_code, 501)
+        self.assertIn("диалог", response.json()["error"])
 
     def test_files_thumb(self):
         response = requests.get(self.url("/api/files/thumb?path=" + quote(str(self.gcode))), timeout=3)

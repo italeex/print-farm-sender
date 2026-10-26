@@ -4,6 +4,8 @@ import json
 import logging
 import logging.handlers
 import os
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -45,6 +47,26 @@ GCODE_SUFFIX = ".gcode"
 JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 NO_CACHE = "no-cache, no-store, must-revalidate"
 IMAGE_CACHE = "no-cache"
+BROWSE_TIMEOUT = 300.0
+DIALOG_SCRIPT = """
+import json
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+root = tk.Tk()
+root.withdraw()
+root.attributes("-topmost", True)
+options = {
+    "title": "Выберите gcode-файлы",
+    "filetypes": [("G-code", "*.gcode"), ("Все файлы", "*.*")],
+}
+if len(sys.argv) > 1 and sys.argv[1]:
+    options["initialdir"] = sys.argv[1]
+paths = filedialog.askopenfilenames(parent=root, **options)
+root.destroy()
+sys.stdout.write(json.dumps(list(paths)))
+"""
 CACHE_HEADERS = {
     "Cache-Control": NO_CACHE,
     "X-Content-Type-Options": "nosniff",
@@ -74,6 +96,51 @@ def list_drives() -> list[str]:
         return [f"{chr(65 + index)}:\\" for index in range(26) if mask & (1 << index)]
     return ["/"]
 
+
+class BrowseError(Exception):
+    pass
+
+
+def existing_gcode_paths(items) -> list[str]:
+    result = []
+    if not isinstance(items, (list, tuple)):
+        return result
+    for item in items:
+        try:
+            path = Path(str(item))
+        except (TypeError, ValueError):
+            continue
+        if path.suffix.lower() != GCODE_SUFFIX:
+            continue
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            continue
+        result.append(str(path.resolve()))
+    return result
+
+
+def _native_browse_files(initial_dir: str = "") -> list[str]:
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", DIALOG_SCRIPT, str(initial_dir or "")],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=BROWSE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BrowseError("Не удалось открыть диалог выбора файлов") from exc
+    if completed.returncode != 0:
+        raise BrowseError("Диалог выбора файлов завершился ошибкой")
+    try:
+        raw_paths = json.loads(completed.stdout or "[]")
+    except ValueError as exc:
+        raise BrowseError("Диалог выбора файлов вернул некорректный ответ") from exc
+    return existing_gcode_paths(raw_paths)
 
 
 class Journal:
@@ -112,9 +179,11 @@ class FarmApp:
         job: JobManager | None = None,
         start_monitor: bool = False,
         idle_timeout: float = IDLE_TIMEOUT,
+        browse_files=None,
     ) -> None:
         self.config_path = Path(config_path)
         self.idle_timeout = float(idle_timeout)
+        self.browse_files = browse_files if browse_files is not None else _native_browse_files
         self.journal = Journal()
         self.thumb_cache = ThumbCache()
         self.config_error = ""
@@ -250,6 +319,9 @@ class FarmHandler(BaseHTTPRequestHandler):
         if path == "/api/send":
             self._api_send()
             return
+        if path == "/api/fs/browse":
+            self._api_fs_browse()
+            return
         if path == "/api/job/cancel":
             self.app.job.cancel()
             self._send_json({"ok": True})
@@ -373,6 +445,25 @@ class FarmHandler(BaseHTTPRequestHandler):
                 "entries": entries,
             }
         )
+
+    def _api_fs_browse(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        initial_dir = payload.get("initial_dir", "")
+        if not isinstance(initial_dir, str):
+            self._send_error(400, "Поле initial_dir должно быть строкой")
+            return
+        browse = getattr(self.app, "browse_files", None)
+        if not callable(browse):
+            browse = _native_browse_files
+        try:
+            paths = browse(initial_dir.strip())
+        except Exception as exc:
+            LOGGER.warning("Диалог выбора файлов недоступен: %s", exc)
+            self._send_error(501, f"Не удалось открыть диалог выбора файлов: {exc}")
+            return
+        self._send_json({"paths": existing_gcode_paths(paths)})
 
     def _api_file_thumb(self, query) -> None:
         raw = self._query_text(query, "path")

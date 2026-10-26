@@ -41,6 +41,7 @@ class PrinterView:
     host: str
     port: int
     mainsail_url: str
+    mainsail_port: int
     online: bool
     state: str
     file: str
@@ -48,6 +49,7 @@ class PrinterView:
     layer: int
     layer_total: int
     eta_seconds: int | None
+    finish_at: int | None
     nozzle: float
     bed: float
     filament: str
@@ -80,6 +82,29 @@ def _as_int(value) -> int:
         return 0
 
 
+def _as_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _finish_fields(state, print_stats, cur_print_data, metadata, progress, now):
+    if state != "printing":
+        return None, None
+    end_time = _as_number(cur_print_data.get("end_time"))
+    if end_time is not None and end_time > now:
+        return int(end_time - now), int(end_time)
+    duration = _as_number(print_stats.get("print_duration"))
+    estimated = _as_number(metadata.get("estimated_time"))
+    if estimated is not None and estimated > 0 and duration is not None and duration >= 0:
+        eta = max(0, int(estimated - duration))
+        return eta, int(now + eta)
+    if duration is not None and duration > 0 and 0 < progress < 1:
+        eta = int(duration * (1 - progress) / progress)
+        return eta, int(now + eta)
+    return None, None
+
+
 def build_view(printer: Printer, *, info, status, now, error, thumb_version) -> PrinterView:
     online = info is not None
     print_stats = (status or {}).get("print_stats") or {}
@@ -93,16 +118,8 @@ def build_view(printer: Printer, *, info, status, now, error, thumb_version) -> 
     vdisk = (status or {}).get("virtual_sdcard") or {}
     cur_print_data = vdisk.get("cur_print_data") or {}
     metadata = cur_print_data.get("metadata") or {}
-
-    end_time = cur_print_data.get("end_time")
-    eta_seconds = None
-    if (
-        state == "printing"
-        and isinstance(end_time, (int, float))
-        and not isinstance(end_time, bool)
-        and end_time > now
-    ):
-        eta_seconds = int(end_time - now)
+    progress = min(max(_as_float(vdisk.get("progress")), 0.0), 1.0)
+    eta_seconds, finish_at = _finish_fields(state, print_stats, cur_print_data, metadata, progress, now)
 
     return PrinterView(
         key=printer.key,
@@ -110,13 +127,15 @@ def build_view(printer: Printer, *, info, status, now, error, thumb_version) -> 
         host=printer.host,
         port=printer.port,
         mainsail_url=printer.mainsail_url,
+        mainsail_port=printer.mainsail_port,
         online=online,
         state=state,
         file=print_stats.get("filename") or "",
-        progress=min(max(_as_float(vdisk.get("progress")), 0.0), 1.0),
+        progress=progress,
         layer=_as_int(vdisk.get("layer")),
         layer_total=_as_int(vdisk.get("layer_count")),
         eta_seconds=eta_seconds,
+        finish_at=finish_at,
         nozzle=_as_float(((status or {}).get("extruder") or {}).get("temperature")),
         bed=_as_float(((status or {}).get("heater_bed") or {}).get("temperature")),
         filament=metadata.get("filament_type") or "",
