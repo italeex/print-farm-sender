@@ -10,9 +10,11 @@ import farm_core
 from farm_core import (
     AppConfig,
     ConfigError,
+    ControlError,
     Printer,
     duplicate_basenames,
     load_config,
+    print_action,
     save_config,
     seed_printers,
     validate_files,
@@ -142,6 +144,7 @@ class FakeMoonraker:
     def __init__(self, status=201, delay=0.0):
         self.status = status
         self.delay = delay
+        self.control_status = 200
         self.requests = []
         self._lock = threading.Lock()
         outer = self
@@ -161,6 +164,27 @@ class FakeMoonraker:
                     self.end_headers()
 
             def do_POST(self):
+                if self.path in (
+                    "/printer/print/pause",
+                    "/printer/print/resume",
+                    "/printer/print/cancel",
+                ):
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length:
+                        self.rfile.read(length)
+                    with outer._lock:
+                        outer.requests.append(
+                            {
+                                "path": self.path,
+                                "content_type": self.headers.get("Content-Type", ""),
+                                "body": b"",
+                            }
+                        )
+                    self.send_response(outer.control_status)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"result": {"ok": true}}')
+                    return
                 if self.path != "/server/files/upload":
                     self.send_response(404)
                     self.end_headers()
@@ -476,6 +500,53 @@ class BatchTests(unittest.TestCase):
         self.assertFalse(sender.running)
         finished = [event for event in events if isinstance(event, FinishedEvent)][-1]
         self.assertFalse(finished.cancelled)
+
+
+class DashboardConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "printers.json"
+
+    def test_old_config_defaults_mainsail_and_refresh(self):
+        self.path.write_text('{"printers": [{"host": "10.0.0.1"}]}', encoding="utf-8")
+        config = load_config(self.path)
+        self.assertEqual(config.printers[0].mainsail_port, 4408)
+        self.assertEqual(config.printers[0].mainsail_url, "http://10.0.0.1:4408")
+        self.assertEqual(config.refresh_seconds, 5)
+
+    def test_mainsail_port_validation_and_clamp(self):
+        self.path.write_text(
+            '{"printers": [{"host": "10.0.0.1", "mainsail_port": 0}], "refresh_seconds": 999}',
+            encoding="utf-8",
+        )
+        config = load_config(self.path)
+        self.assertEqual(config.printers[0].mainsail_port, 4408)
+        self.assertEqual(config.refresh_seconds, 30)
+        saved = json.loads(json.dumps(config.to_dict(), ensure_ascii=False))
+        self.assertEqual(saved["printers"][0]["mainsail_port"], 4408)
+        self.assertEqual(saved["refresh_seconds"], 30)
+
+
+class PrintControlTests(unittest.TestCase):
+    def setUp(self):
+        self.server = FakeMoonraker().start()
+        self.addCleanup(self.server.stop)
+        self.printer = Printer("test", "127.0.0.1", self.server.port)
+
+    def test_pause_posts_to_moonraker(self):
+        print_action(self.printer, "pause")
+        self.assertEqual(self.server.requests[-1]["path"], "/printer/print/pause")
+
+    def test_unknown_action_rejected(self):
+        with self.assertRaises(ControlError):
+            print_action(self.printer, "start")
+
+    def test_control_error_contains_russian_text(self):
+        self.server.control_status = 500
+        with self.assertRaises(ControlError) as caught:
+            print_action(self.printer, "cancel")
+        self.assertIn("отменить", str(caught.exception).lower())
 
 
 if __name__ == "__main__":

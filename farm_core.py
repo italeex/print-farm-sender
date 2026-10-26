@@ -17,6 +17,12 @@ UPLOAD_CHUNK_SIZE = 65536
 PROGRESS_INTERVAL = 0.2
 INFO_PATH = "/server/info"
 UPLOAD_PATH = "/server/files/upload"
+MAINSAIL_PORT = 4408
+PAUSE_PATH = "/printer/print/pause"
+RESUME_PATH = "/printer/print/resume"
+CANCEL_PATH = "/printer/print/cancel"
+CONTROL_PATHS = {"pause": PAUSE_PATH, "resume": RESUME_PATH, "cancel": CANCEL_PATH}
+CONTROL_TITLES = {"pause": "поставить на паузу", "resume": "продолжить", "cancel": "отменить"}
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "printers.json"
 CREALITY_HOME = Path(os.environ.get("APPDATA", "")) / "Creality" / "Creality Print"
@@ -26,22 +32,31 @@ class ConfigError(Exception):
     pass
 
 
+class ControlError(Exception):
+    pass
+
+
 @dataclass
 class Printer:
     name: str
     host: str
     port: int = DEFAULT_PORT
+    mainsail_port: int = MAINSAIL_PORT
 
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
 
     @property
+    def mainsail_url(self) -> str:
+        return f"http://{self.host}:{self.mainsail_port}"
+
+    @property
     def key(self) -> str:
         return f"{self.host}:{self.port}"
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "host": self.host, "port": self.port}
+        return {"name": self.name, "host": self.host, "port": self.port, "mainsail_port": self.mainsail_port}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Printer":
@@ -51,10 +66,17 @@ class Printer:
             port = DEFAULT_PORT
         if not 1 <= port <= 65535:
             port = DEFAULT_PORT
+        try:
+            mainsail_port = int(data.get("mainsail_port") or MAINSAIL_PORT)
+        except (TypeError, ValueError):
+            mainsail_port = MAINSAIL_PORT
+        if not 1 <= mainsail_port <= 65535:
+            mainsail_port = MAINSAIL_PORT
         return cls(
             name=str(data.get("name") or data.get("host") or "Printer"),
             host=str(data["host"]).strip(),
             port=port,
+            mainsail_port=mainsail_port,
         )
 
 
@@ -63,12 +85,14 @@ class AppConfig:
     printers: list[Printer] = field(default_factory=list)
     last_dir: str = ""
     window: dict = field(default_factory=lambda: {"width": 1180, "height": 760})
+    refresh_seconds: int = 5
 
     def to_dict(self) -> dict:
         return {
             "printers": [printer.to_dict() for printer in self.printers],
             "last_dir": self.last_dir,
             "window": self.window,
+            "refresh_seconds": self.refresh_seconds,
         }
 
     @classmethod
@@ -92,10 +116,19 @@ class AppConfig:
         window = data.get("window")
         if not isinstance(window, dict):
             window = {"width": 1180, "height": 760}
+        try:
+            refresh_seconds = int(data.get("refresh_seconds") or 5)
+        except (TypeError, ValueError):
+            refresh_seconds = 5
+        if refresh_seconds < 2:
+            refresh_seconds = 2
+        elif refresh_seconds > 30:
+            refresh_seconds = 30
         return cls(
             printers=printers,
             last_dir=str(data.get("last_dir") or ""),
             window=window,
+            refresh_seconds=refresh_seconds,
         )
 
 
@@ -311,6 +344,21 @@ def probe_many(printers: Sequence[Printer], timeout: float = 1.5) -> dict[str, b
     with ThreadPoolExecutor(max_workers=len(printers)) as pool:
         future_map = {pool.submit(probe_printer, printer, timeout): printer for printer in printers}
         return {future_map[future].key: future.result() for future in as_completed(future_map)}
+
+
+def print_action(printer: Printer, action: str, *, session=None, timeout: float = 5.0) -> None:
+    path = CONTROL_PATHS.get(action)
+    if path is None:
+        raise ControlError(f"Неизвестное действие: {action}")
+    client = session or requests
+    try:
+        response = client.post(printer.base_url + path, timeout=timeout)
+    except requests.RequestException as exc:
+        raise ControlError(f"Не удалось {CONTROL_TITLES[action]}: {exc}") from exc
+    if response.status_code >= 400:
+        raise ControlError(
+            f"Не удалось {CONTROL_TITLES[action]}: HTTP {response.status_code}"
+        )
 
 
 def upload_file(
