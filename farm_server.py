@@ -3,20 +3,34 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
 import threading
 import time
 import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
-from farm_core import APP_DIR, CONFIG_PATH, AppConfig, ConfigError, load_config
-from farm_jobs import JobManager
+from farm_core import (
+    APP_DIR,
+    CONFIG_PATH,
+    CONTROL_PATHS,
+    DEFAULT_PORT,
+    MAINSAIL_PORT,
+    AppConfig,
+    ConfigError,
+    ControlError,
+    Printer,
+    load_config,
+    print_action,
+    save_config,
+)
+from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
-from farm_thumbs import ThumbCache
+from farm_thumbs import ThumbCache, thumbnail_from_file
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,8 +40,11 @@ IDLE_TIMEOUT = 600.0
 IDLE_CHECK_SECONDS = 5.0
 LOG_MAX_BYTES = 1_048_576
 LOG_BACKUPS = 3
+MAX_BODY_BYTES = 1_048_576
+GCODE_SUFFIX = ".gcode"
 JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 NO_CACHE = "no-cache, no-store, must-revalidate"
+IMAGE_CACHE = "no-cache"
 CACHE_HEADERS = {
     "Cache-Control": NO_CACHE,
     "X-Content-Type-Options": "nosniff",
@@ -38,6 +55,25 @@ MIME_TYPES = {
     ".js": "application/javascript; charset=utf-8",
 }
 STATIC_ROUTES = {"/", "/styles.css", "/app.js"}
+
+
+def list_drives() -> list[str]:
+    lister = getattr(os, "listdrives", None)
+    if lister is not None:
+        try:
+            return list(lister())
+        except OSError:
+            return []
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            mask = ctypes.windll.kernel32.GetLogicalDrives()
+        except Exception:
+            return []
+        return [f"{chr(65 + index)}:\\" for index in range(26) if mask & (1 << index)]
+    return ["/"]
+
 
 
 class Journal:
@@ -157,14 +193,30 @@ class FarmApp:
 class FarmHandler(BaseHTTPRequestHandler):
     app = None
     server_version = "PrinterFarm/1.0"
+    _body = b""
+    _body_error = None
 
     def do_GET(self) -> None:
-        path = unquote(urlparse(self.path).path)
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        query = parse_qs(parsed.query)
         if path == "/api/state":
             self._send_json(self.app.state_snapshot())
             return
         if path == "/api/journal":
-            self._send_json({"entries": self.app.journal.snapshot()})
+            self._api_journal(query)
+            return
+        if path == "/api/printers":
+            self._api_printer_list()
+            return
+        if path == "/api/fs":
+            self._api_fs(query)
+            return
+        if path == "/api/files/thumb":
+            self._api_file_thumb(query)
+            return
+        if path.startswith("/api/thumb/"):
+            self._api_thumb(path[len("/api/thumb/"):])
             return
         if path in STATIC_ROUTES:
             target = self._resolve_static(path)
@@ -176,10 +228,11 @@ class FarmHandler(BaseHTTPRequestHandler):
         self._send_error(404, "Неизвестный адрес")
 
     def do_POST(self) -> None:
-        path = unquote(urlparse(self.path).path)
-        if not self._origin_allowed():
-            self._send_error(403, "Запрос с чужого источника отклонён")
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if not self._guard_origin():
             return
+        self._buffer_body()
         if path == "/api/heartbeat":
             self.app.last_heartbeat = time.time()
             self._send_json({"ok": True})
@@ -188,7 +241,46 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             threading.Thread(target=self.app.shutdown, name="farm-shutdown", daemon=True).start()
             return
+        if path == "/api/send":
+            self._api_send()
+            return
+        if path == "/api/job/cancel":
+            self.app.job.cancel()
+            self._send_json({"ok": True})
+            return
+        if path == "/api/printers":
+            self._api_printer_create()
+            return
+        if path.startswith("/api/print/"):
+            self._api_print(path[len("/api/print/"):])
+            return
         self._send_error(404, "Неизвестный адрес")
+
+    def do_PUT(self) -> None:
+        path = unquote(urlparse(self.path).path)
+        if not self._guard_origin():
+            return
+        self._buffer_body()
+        if path.startswith("/api/printers/"):
+            self._api_printer_update(path[len("/api/printers/"):])
+            return
+        self._send_error(404, "Неизвестный адрес")
+
+    def do_DELETE(self) -> None:
+        path = unquote(urlparse(self.path).path)
+        if not self._guard_origin():
+            return
+        self._buffer_body()
+        if path.startswith("/api/printers/"):
+            self._api_printer_delete(path[len("/api/printers/"):])
+            return
+        self._send_error(404, "Неизвестный адрес")
+
+    def _guard_origin(self) -> bool:
+        if self._origin_allowed():
+            return True
+        self._send_error(403, "Запрос с чужого источника отклонён")
+        return False
 
     def _origin_allowed(self) -> bool:
         origin = self.headers.get("Origin")
@@ -197,6 +289,320 @@ class FarmHandler(BaseHTTPRequestHandler):
         port = self.server.server_address[1]
         allowed = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
         return origin in allowed
+
+    def _api_journal(self, query) -> None:
+        since = self._query_int(query, "since")
+        entries = [entry for entry in self.app.journal.snapshot() if entry["id"] > since]
+        last = entries[-1]["id"] if entries else since
+        self._send_json({"entries": entries, "next": last})
+
+    def _api_fs(self, query) -> None:
+        raw = self._query_text(query, "path")
+        if not raw:
+            entries = [
+                {"name": drive, "path": drive, "is_dir": True, "size": 0, "modified": 0.0}
+                for drive in list_drives()
+            ]
+            self._send_json({"path": "", "parent": None, "entries": entries})
+            return
+        target = Path(raw)
+        entries = []
+        try:
+            with os.scandir(target) as scanner:
+                for item in scanner:
+                    try:
+                        if item.is_dir():
+                            entries.append(
+                                {
+                                    "name": item.name,
+                                    "path": item.path,
+                                    "is_dir": True,
+                                    "size": 0,
+                                    "modified": 0.0,
+                                }
+                            )
+                            continue
+                        if not item.name.lower().endswith(GCODE_SUFFIX):
+                            continue
+                        stat = item.stat()
+                    except OSError:
+                        continue
+                    entries.append(
+                        {
+                            "name": item.name,
+                            "path": item.path,
+                            "is_dir": False,
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime,
+                        }
+                    )
+        except PermissionError:
+            self._send_error(403, "Нет доступа к папке")
+            return
+        except OSError:
+            self._send_error(404, "Папка не найдена")
+            return
+        entries.sort(key=lambda entry: (not entry["is_dir"], entry["name"].lower()))
+        parent = target.parent
+        self._send_json(
+            {
+                "path": str(target),
+                "parent": "" if parent == target else str(parent),
+                "entries": entries,
+            }
+        )
+
+    def _api_file_thumb(self, query) -> None:
+        raw = self._query_text(query, "path")
+        if not raw:
+            self._send_error(400, "Не указан путь к файлу")
+            return
+        data = thumbnail_from_file(Path(raw))
+        if not data:
+            self._send_error(404, "Превью не найдено")
+            return
+        self._send_image(data)
+
+    def _api_thumb(self, raw_key: str) -> None:
+        key = raw_key.strip("/")
+        views = self.app.monitor.snapshot().get("printers") or []
+        view = next((item for item in views if item.get("key") == key), None)
+        if view is None:
+            self._send_error(404, "Принтер не найден")
+            return
+        cache_key = (key, str(view.get("file") or ""))
+        data = self.app.thumb_cache.get(cache_key, lambda: None)
+        if not data:
+            self._send_error(404, "Превью не найдено")
+            return
+        version = str(view.get("thumb_version") or "")
+        etag = f'"{version}"' if version else ""
+        if etag and self._etag_matches(etag):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", IMAGE_CACHE)
+            self.end_headers()
+            return
+        self._send_image(data, etag)
+
+    def _api_print(self, rest: str) -> None:
+        key, _, action = rest.rpartition("/")
+        if not key or not action:
+            self._send_error(404, "Неизвестный адрес")
+            return
+        if action not in CONTROL_PATHS:
+            self._send_error(400, f"Неизвестное действие: {action}")
+            return
+        printer = next((item for item in self.app.config.printers if item.key == key), None)
+        if printer is None:
+            self._send_error(404, "Принтер не найден")
+            return
+        try:
+            print_action(printer, action)
+        except ControlError as exc:
+            self._send_error(502, str(exc))
+            return
+        try:
+            self.app.monitor.refresh()
+        except Exception:
+            LOGGER.exception("Не удалось обновить состояние после действия")
+        self._send_json({"ok": True, "action": action})
+
+    def _api_send(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_printers = payload.get("printers")
+        raw_files = payload.get("files")
+        if not isinstance(raw_printers, list) or not isinstance(raw_files, list):
+            self._send_error(400, "Ожидались списки printers и files")
+            return
+        keys = list(dict.fromkeys(str(item) for item in raw_printers))
+        known = {printer.key: printer for printer in self.app.config.printers}
+        missing = [key for key in keys if key not in known]
+        if missing:
+            self._send_error(400, "Принтер не найден: " + ", ".join(missing))
+            return
+        printers = [known[key] for key in keys]
+        if not printers:
+            self._send_error(400, "Не выбраны принтеры.")
+            return
+        paths = [Path(str(item)) for item in raw_files]
+        try:
+            self.app.job.start(printers, paths)
+        except JobError as exc:
+            self._send_error(400, str(exc))
+            return
+        if paths:
+            self.app.config.last_dir = str(paths[0].parent)
+            try:
+                save_config(self.app.config, self.app.config_path)
+            except OSError as exc:
+                self.app.journal.add(f"Не удалось сохранить каталог: {exc}", "warning")
+        self.app.journal.add(f"Отправка запущена: файлов {len(paths)}, принтеров {len(printers)}")
+        self._send_json({"ok": True, "files": len(paths), "printers": len(printers)}, status=202)
+
+    def _api_printer_list(self) -> None:
+        self._send_json({"printers": [self._printer_payload(item) for item in self.app.config.printers]})
+
+    def _api_printer_create(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        printer = self._parse_printer(payload)
+        if printer is None:
+            return
+        if any(item.key == printer.key for item in self.app.config.printers):
+            self._send_error(409, "Принтер с таким адресом уже добавлен")
+            return
+        previous = list(self.app.config.printers)
+        self.app.config.printers = previous + [printer]
+        if not self._persist_printers(previous):
+            return
+        self.app.journal.add(f"Принтер добавлен: {printer.name}")
+        self._send_json({"ok": True, "printer": self._printer_payload(printer)}, status=201)
+
+    def _api_printer_update(self, raw_key: str) -> None:
+        key = raw_key.strip("/")
+        printers = self.app.config.printers
+        index = next((position for position, item in enumerate(printers) if item.key == key), None)
+        if index is None:
+            self._send_error(404, "Принтер не найден")
+            return
+        payload = self._read_json()
+        if payload is None:
+            return
+        printer = self._parse_printer(payload)
+        if printer is None:
+            return
+        if any(item.key == printer.key for position, item in enumerate(printers) if position != index):
+            self._send_error(409, "Принтер с таким адресом уже добавлен")
+            return
+        previous = list(printers)
+        updated = list(printers)
+        updated[index] = printer
+        self.app.config.printers = updated
+        if not self._persist_printers(previous):
+            return
+        self.app.journal.add(f"Принтер сохранён: {printer.name}")
+        self._send_json({"ok": True, "printer": self._printer_payload(printer)})
+
+    def _api_printer_delete(self, raw_key: str) -> None:
+        key = raw_key.strip("/")
+        printers = self.app.config.printers
+        index = next((position for position, item in enumerate(printers) if item.key == key), None)
+        if index is None:
+            self._send_error(404, "Принтер не найден")
+            return
+        previous = list(printers)
+        self.app.config.printers = [item for position, item in enumerate(printers) if position != index]
+        if not self._persist_printers(previous):
+            return
+        self.app.journal.add(f"Принтер удалён: {key}")
+        self._send_json({"ok": True})
+
+    def _parse_printer(self, payload: dict) -> Printer | None:
+        host = str(payload.get("host") or "").strip()
+        if not host:
+            self._send_error(400, "Укажите адрес принтера")
+            return None
+        port = self._parse_port(payload.get("port"), DEFAULT_PORT)
+        if port is None:
+            return None
+        mainsail_port = self._parse_port(payload.get("mainsail_port"), MAINSAIL_PORT)
+        if mainsail_port is None:
+            return None
+        name = str(payload.get("name") or "").strip() or host
+        return Printer(name=name, host=host, port=port, mainsail_port=mainsail_port)
+
+    def _parse_port(self, raw, fallback: int) -> int | None:
+        if raw is None or raw == "":
+            return fallback
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            self._send_error(400, "Порт должен быть числом")
+            return None
+        if not 1 <= value <= 65535:
+            self._send_error(400, "Порт должен быть от 1 до 65535")
+            return None
+        return value
+
+    def _persist_printers(self, previous) -> bool:
+        try:
+            save_config(self.app.config, self.app.config_path)
+        except OSError as exc:
+            self.app.config.printers = previous
+            self._send_error(500, f"Не удалось сохранить конфигурацию: {exc}")
+            return False
+        self.app.monitor.set_printers(self.app.config.printers)
+        return True
+
+    @staticmethod
+    def _printer_payload(printer: Printer) -> dict:
+        payload = printer.to_dict()
+        payload["key"] = printer.key
+        return payload
+
+    def _buffer_body(self) -> None:
+        self._body = b""
+        self._body_error = None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._body_error = (400, "Некорректная длина тела запроса")
+            return
+        if length < 0:
+            self._body_error = (400, "Некорректная длина тела запроса")
+            return
+        if length > MAX_BODY_BYTES:
+            self.rfile.read(MAX_BODY_BYTES)
+            self._body_error = (413, "Тело запроса больше 1 МБ")
+            self.close_connection = True
+            return
+        if length:
+            self._body = self.rfile.read(length)
+
+    def _read_json(self) -> dict | None:
+        if self._body_error is not None:
+            status, message = self._body_error
+            self._send_error(status, message)
+            return None
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            self._send_error(415, "Ожидался Content-Type application/json")
+            return None
+        if not self._body:
+            return {}
+        try:
+            payload = json.loads(self._body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._send_error(400, "Некорректный JSON в запросе")
+            return None
+        if not isinstance(payload, dict):
+            self._send_error(400, "Ожидался JSON-объект")
+            return None
+        return payload
+
+    @staticmethod
+    def _query_text(query, name: str) -> str:
+        return (query.get(name) or [""])[0].strip()
+
+    def _query_int(self, query, name: str) -> int:
+        raw = self._query_text(query, name)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    def _etag_matches(self, etag: str) -> bool:
+        header = (self.headers.get("If-None-Match") or "").strip()
+        if not header:
+            return False
+        if header == "*":
+            return True
+        return etag in [token.strip() for token in header.split(",")]
+
 
     def _resolve_static(self, path: str) -> Path | None:
         relative = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -237,6 +643,17 @@ class FarmHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_image(self, data: bytes, etag: str = "") -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", IMAGE_CACHE)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if etag:
+            self.send_header("ETag", etag)
+        self.end_headers()
+        self.wfile.write(data)
 
     def log_message(self, format, *args) -> None:
         LOGGER.debug("%s - %s", self.address_string(), format % args)
