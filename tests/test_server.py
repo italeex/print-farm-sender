@@ -125,7 +125,8 @@ class ServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "printers.json"
             path.write_text("{", encoding="utf-8")
-            app = FarmApp(config_path=path, start_monitor=False)
+            with self.assertLogs("farm_server", level="ERROR"):
+                app = FarmApp(config_path=path, start_monitor=False)
             self.assertEqual(app.config.printers, [])
             self.assertTrue(Path(str(path) + ".broken").exists())
             self.assertFalse(path.exists())
