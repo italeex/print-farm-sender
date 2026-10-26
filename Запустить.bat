@@ -1,8 +1,8 @@
 @echo off
 cd /d "%~dp0"
 where pythonw >nul 2>nul
-if %errorlevel%==0 (
-  start "" pythonw print_farm_sender.py
+if not errorlevel 1 (
+  start "" pythonw farm_server.py
 ) else (
-  python print_farm_sender.py
+  python farm_server.py
 )
