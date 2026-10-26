@@ -103,7 +103,7 @@ python -m unittest discover -s tests -v
 python -m py_compile farm_core.py farm_errors.py farm_thumbs.py farm_monitor.py farm_jobs.py farm_server.py
 ```
 
-107 тестов. Все сетевые тесты используют fake Moonraker на `127.0.0.1` с эфемерным портом; реальные принтеры не задействованы.
+120 тестов. Все сетевые тесты используют fake Moonraker на `127.0.0.1` с эфемерным портом; реальные принтеры не задействованы.
 
 ## Ограничения
 
