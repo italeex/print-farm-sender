@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,8 @@ from farm_core import AppConfig, Printer
 from farm_errors import ErrorInfo, parse_error
 from farm_thumbs import ThumbCache, thumbnail_from_http
 
+LOGGER = logging.getLogger(__name__)
+
 PRINT_STATE_MAP = {
     "printing": "printing",
     "paused": "paused",
@@ -19,6 +22,7 @@ INFO_PATH = "/printer/info"
 OBJECTS_PATH = "/printer/objects/query?print_stats&virtual_sdcard&extruder&heater_bed&display_status"
 LOG_PATH = "/server/files/logs/klippy.log"
 LOG_RANGE = "bytes=-65536"
+MAX_LOG_BYTES = 65536
 INFO_TIMEOUT = 2.5
 OBJECTS_TIMEOUT = 2.5
 LOG_TIMEOUT = 3.0
@@ -153,6 +157,7 @@ class FarmMonitor:
         self._thread = None
         self._pool = None
         self._local = threading.local()
+        self._sessions = []
         self._updated_at = 0.0
 
     @property
@@ -169,13 +174,23 @@ class FarmMonitor:
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread
-        self._thread = None
         if thread is not None:
             thread.join(JOIN_TIMEOUT)
+            if thread.is_alive():
+                return
+            self._thread = None
         pool = self._pool
         self._pool = None
         if pool is not None:
             pool.shutdown(wait=False)
+        with self._lock:
+            sessions = self._sessions
+            self._sessions = []
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
 
     def set_printers(self, printers) -> None:
         printers = list(printers)
@@ -207,20 +222,25 @@ class FarmMonitor:
         for printer, future in futures:
             try:
                 result = future.result()
-                with self._lock:
-                    self._apply(printer, result, now)
             except Exception:
-                try:
-                    with self._lock:
-                        self._apply(printer, (None, None, "", None, ""), now)
-                except Exception:
-                    pass
+                LOGGER.exception("Опрос принтера %s завершился ошибкой", printer.name)
+                result = (None, None, "", None, "")
+            try:
+                with self._lock:
+                    self._apply(printer, result)
+            except Exception:
+                LOGGER.exception("Не удалось применить результат опроса принтера %s", printer.name)
         with self._lock:
-            self._updated_at = now
+            self._updated_at = self._clock()
 
     def snapshot(self) -> dict:
         with self._lock:
-            views = [self._views[printer.key] for printer in self._printers if printer.key in self._views]
+            views = []
+            for printer in self._printers:
+                view = self._views.get(printer.key)
+                if view is None:
+                    view = build_view(printer, info=None, status=None, now=0, error=None, thumb_version="")
+                views.append(view)
             updated_at = self._updated_at
         return {
             "printers": [asdict(view) for view in views],
@@ -236,18 +256,21 @@ class FarmMonitor:
             try:
                 self.poll_once()
             except Exception:
-                pass
+                LOGGER.exception("Сбой в цикле опроса принтеров")
 
     def _ensure_pool(self):
-        if self._pool is None:
-            self._pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        return self._pool
+        with self._lock:
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+            return self._pool
 
     def _session(self):
         session = getattr(self._local, "session", None)
         if session is None:
             session = requests.Session()
             self._local.session = session
+            with self._lock:
+                self._sessions.append(session)
         return session
 
     def _fetch(self, printer):
@@ -259,7 +282,7 @@ class FarmMonitor:
         try:
             status = self._fetch_objects(session, printer)
         except Exception as exc:
-            return None, None, str(exc), None, ""
+            return info, None, str(exc), None, ""
         print_stats = status.get("print_stats") or {}
         state_name = str(info.get("state") or "")
         error_info = None
@@ -301,9 +324,13 @@ class FarmMonitor:
             printer.base_url + LOG_PATH,
             headers={"Range": LOG_RANGE},
             timeout=LOG_TIMEOUT,
+            stream=True,
         )
-        response.raise_for_status()
-        return response.text
+        try:
+            response.raise_for_status()
+            return response.raw.read(MAX_LOG_BYTES).decode("utf-8", "replace")
+        finally:
+            response.close()
 
     def _get_json(self, session, url, timeout):
         response = session.get(url, timeout=timeout)
@@ -321,11 +348,16 @@ class FarmMonitor:
         self._thumb_cache.get(cache_key, load)
         return self._thumb_cache.version(cache_key)
 
-    def _apply(self, printer, result, now) -> None:
-        info, status, _, error_info, thumb_version = result
+    def _apply(self, printer, result) -> None:
+        info, status, reason, error_info, thumb_version = result
         key = printer.key
+        if key not in {item.key for item in self._printers}:
+            return
+        now = self._clock()
         previous = self._views.get(key)
         if info is None:
+            if reason:
+                LOGGER.warning("Принтер %s недоступен: %s", printer.name, reason)
             failures = self._failures.get(key, 0) + 1
             self._failures[key] = failures
             self._next_due[key] = now + min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (failures - 1))
@@ -336,6 +368,8 @@ class FarmMonitor:
             return
         self._failures[key] = 0
         self._next_due[key] = now + self._interval
+        if status is None and reason:
+            LOGGER.warning("Принтер %s ответил без статуса: %s", printer.name, reason)
         error = error_info if error_info is not None else self._last_error.get(key)
         view = build_view(printer, info=info, status=status, now=now, error=error, thumb_version=thumb_version)
         if view.state in ("printing", "idle"):

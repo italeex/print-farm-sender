@@ -17,6 +17,8 @@ DEFAULT_STATUS = {
     "display_status": {"progress": 0.4},
 }
 
+UNSET = object()
+
 
 def gcode_with_thumb(payload):
     encoded = base64.b64encode(payload).decode("ascii")
@@ -25,9 +27,9 @@ def gcode_with_thumb(payload):
 
 
 class FakeMoonraker:
-    def __init__(self, *, info=None, objects=None, thumb=None, log_tail="", failures=0):
+    def __init__(self, *, info=None, objects=UNSET, thumb=None, log_tail="", failures=0):
         self.info = info or {"state": "ready", "state_message": "Printer is ready"}
-        self.objects = objects or DEFAULT_STATUS
+        self.objects = DEFAULT_STATUS if objects is UNSET else objects
         self.thumb = thumb
         self.log_tail = log_tail
         self.failures = failures
@@ -72,6 +74,9 @@ class FakeMoonraker:
                     self._send_json({"result": fake.info})
                     return
                 if path == "/printer/objects/query":
+                    if fake.objects is None:
+                        self.send_error(500)
+                        return
                     self._send_json({"result": {"status": fake.objects}})
                     return
                 if path.startswith("/server/files/gcodes/"):

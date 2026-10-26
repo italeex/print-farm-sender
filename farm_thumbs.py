@@ -2,6 +2,7 @@ import base64
 import binascii
 import hashlib
 import re
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote
@@ -82,6 +83,7 @@ class ThumbCache:
         self._maxsize = maxsize
         self._store: dict = {}
         self._order: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
 
     def _touch(self, key):
         try:
@@ -99,23 +101,28 @@ class ThumbCache:
             version = hashlib.sha1(bytes(data)).hexdigest()[:12]
         else:
             version = ""
-        self._store[key] = (version, data)
-        self._touch(key)
-        self._evict()
+        with self._lock:
+            self._store[key] = (version, data)
+            self._touch(key)
+            self._evict()
 
     def version(self, key):
-        entry = self._store.get(key)
-        if not entry:
-            return ""
-        return entry[0]
+        with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return ""
+            return entry[0]
 
     def get(self, key, loader):
-        if key in self._store:
-            self._touch(key)
-            return self._store[key][1]
+        with self._lock:
+            entry = self._store.get(key)
+            if entry:
+                self._touch(key)
+                return entry[1]
         try:
             data = loader()
         except Exception:
-            data = None
-        self.put(key, data)
+            return None
+        if data:
+            self.put(key, data)
         return data
