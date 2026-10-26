@@ -12,7 +12,7 @@ const COMPACT_KEY = "farm.compact";
 const GROUPED_KEY = "farm.grouped";
 const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
-const EXPECTED_SERVER_VERSION = "2.2.0";
+const EXPECTED_SERVER_VERSION = "2.3.0";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
@@ -35,6 +35,12 @@ const ACTION_LABELS = {
   resume: "Печать продолжена",
   cancel: "Печать отменена",
 };
+const UI_LABELS = {
+  mainsail: "Mainsail",
+  fluidd: "Fluidd",
+  unknown: "Интерфейс",
+};
+const SCAN_TIMEOUT_MS = 60000;
 
 const state = {
   printers: [],
@@ -70,6 +76,17 @@ let filesCountEl = null;
 let filesNamesEl = null;
 let modalFiles = null;
 let modalPrinters = null;
+let modalScan = null;
+let scanSubnetEl = null;
+let scanPortEl = null;
+let scanUiPortEl = null;
+let scanRunEl = null;
+let scanStatusEl = null;
+let scanResultsEl = null;
+let scanAddEl = null;
+let scanBusy = false;
+let scanFound = [];
+let scanSelected = new Set();
 let modalError = null;
 let modalConfirm = null;
 let modalRename = null;
@@ -657,6 +674,16 @@ function cameraUrl(view) {
   return "http://" + host + ":" + CAMERA_PORT + "/";
 }
 
+function uiUrl(view) {
+  const url = view && typeof view.mainsail_url === "string" ? view.mainsail_url.trim() : "";
+  return /^https?:\/\//i.test(url) ? url : "";
+}
+
+function uiLabel(view) {
+  const kind = view && typeof view.ui_kind === "string" ? view.ui_kind.toLowerCase() : "";
+  return UI_LABELS[kind] || UI_LABELS.unknown;
+}
+
 function createCard(view) {
   if (!templateEl || !templateEl.content) return null;
   const node = templateEl.content.firstElementChild;
@@ -691,6 +718,8 @@ function createCard(view) {
     uploadBar: field(el, "upload-bar"),
     uploadPct: field(el, "upload-pct"),
     mainsail: field(el, "mainsail"),
+    mainsailLabel: field(el, "mainsail-label"),
+    mainsailMenu: field(el, "mainsail-menu"),
     camera: field(el, "camera"),
     pause: field(el, "pause"),
     resume: field(el, "resume"),
@@ -771,9 +800,10 @@ function upsertCard(view) {
     }
   }
 
+  const url = uiUrl(view);
+  setText(refs.mainsailLabel, uiLabel(view));
   if (refs.mainsail) {
-    const url = typeof view.mainsail_url === "string" ? view.mainsail_url : "";
-    if (/^https?:\/\//i.test(url)) {
+    if (url) {
       refs.mainsail.href = url;
       refs.mainsail.removeAttribute("aria-disabled");
       refs.mainsail.classList.remove("disabled");
@@ -782,7 +812,20 @@ function upsertCard(view) {
       refs.mainsail.removeAttribute("href");
       refs.mainsail.setAttribute("aria-disabled", "true");
       refs.mainsail.classList.add("disabled");
-      refs.mainsail.title = "Адрес Mainsail неизвестен";
+      refs.mainsail.title = "Адрес интерфейса неизвестен";
+    }
+  }
+  if (refs.mainsailMenu) {
+    if (url) {
+      refs.mainsailMenu.setAttribute("href", url);
+      refs.mainsailMenu.removeAttribute("aria-disabled");
+      refs.mainsailMenu.classList.remove("disabled");
+      refs.mainsailMenu.title = url;
+    } else {
+      refs.mainsailMenu.removeAttribute("href");
+      refs.mainsailMenu.setAttribute("aria-disabled", "true");
+      refs.mainsailMenu.classList.add("disabled");
+      refs.mainsailMenu.title = "Адрес интерфейса неизвестен";
     }
   }
 
@@ -1921,6 +1964,174 @@ async function deletePrinter() {
   }
 }
 
+function scanAddress(item) {
+  const host = item && typeof item.host === "string" ? item.host.trim() : "";
+  const port = Number(item && item.port);
+  return host + ":" + (Number.isFinite(port) && port > 0 ? port : 7125);
+}
+
+function existingAddresses() {
+  const known = new Set();
+  for (const view of state.printers) {
+    if (!view || !view.host) continue;
+    known.add(scanAddress(view));
+  }
+  return known;
+}
+
+function updateScanFooter() {
+  if (scanAddEl) scanAddEl.disabled = scanBusy || scanSelected.size === 0;
+}
+
+function renderScanResults() {
+  if (!scanResultsEl) return;
+  scanResultsEl.textContent = "";
+  const known = existingAddresses();
+  for (const item of scanFound) {
+    const key = scanAddress(item);
+    const added = known.has(key);
+    const row = document.createElement("li");
+    row.className = "scan-row" + (added ? " added" : "");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "check";
+    box.disabled = added;
+    box.checked = added ? false : scanSelected.has(key);
+    box.setAttribute("aria-label", "Добавить " + (item.name || key));
+    box.addEventListener("change", function () {
+      if (box.checked) scanSelected.add(key);
+      else scanSelected.delete(key);
+      updateScanFooter();
+    });
+    const who = document.createElement("div");
+    who.className = "who";
+    const name = document.createElement("b");
+    name.textContent = String(item.name || key);
+    const address = document.createElement("small");
+    address.textContent = key + (added ? " · уже добавлен" : "");
+    who.appendChild(name);
+    who.appendChild(address);
+    const kind = document.createElement("span");
+    kind.className = "badge";
+    kind.textContent = uiLabel(item);
+    row.appendChild(box);
+    row.appendChild(who);
+    row.appendChild(kind);
+    scanResultsEl.appendChild(row);
+  }
+  updateScanFooter();
+}
+
+function openScanModal() {
+  if (!modalScan) return;
+  openModal(modalScan);
+  renderScanResults();
+  if (scanRunEl) {
+    window.setTimeout(function () {
+      if (modalScan && !modalScan.hidden) scanRunEl.focus();
+    }, 0);
+  }
+}
+
+async function runScan() {
+  if (scanBusy) return;
+  const subnet = scanSubnetEl ? scanSubnetEl.value.trim() : "";
+  const port = scanPortEl ? Number(scanPortEl.value) : 7125;
+  const uiPort = scanUiPortEl ? Number(scanUiPortEl.value) : 4408;
+  if (!validPort(port) || !validPort(uiPort)) {
+    toast("Порт должен быть от 1 до 65535.", "warn");
+    return;
+  }
+  scanBusy = true;
+  scanFound = [];
+  scanSelected = new Set();
+  if (scanRunEl) scanRunEl.disabled = true;
+  setText(scanStatusEl, "Сканирование… это может занять до минуты");
+  renderScanResults();
+  const body = { moonraker_port: port, ui_port: uiPort };
+  if (subnet) body.subnet = subnet;
+  try {
+    const data = await requestJSON("/api/scan", {
+      method: "POST",
+      body: body,
+      timeout: SCAN_TIMEOUT_MS,
+    });
+    scanFound =
+      data && Array.isArray(data.found)
+        ? data.found.filter(function (item) {
+            return item && typeof item.host === "string" && item.host.trim();
+          })
+        : [];
+    const resolved = data && typeof data.subnet === "string" ? data.subnet : "";
+    if (resolved && scanSubnetEl) scanSubnetEl.value = resolved;
+    renderScanResults();
+    const scanned = Number(data && data.scanned);
+    const scannedText = Number.isFinite(scanned) && scanned > 0 ? "Проверено адресов: " + scanned + ". " : "";
+    setText(scanStatusEl, scannedText + "Найдено: " + scanFound.length + ".");
+  } catch (error) {
+    scanFound = [];
+    renderScanResults();
+    setText(scanStatusEl, errorText(error, "Не удалось просканировать сеть."));
+    toast(errorText(error, "Не удалось просканировать сеть."), "error");
+  } finally {
+    scanBusy = false;
+    if (scanRunEl) scanRunEl.disabled = false;
+    updateScanFooter();
+  }
+}
+
+async function importScanResults() {
+  if (scanBusy || !scanSelected.size) {
+    if (!scanSelected.size) toast("Выберите принтеры.", "warn");
+    return;
+  }
+  const known = existingAddresses();
+  const chosen = scanFound.filter(function (item) {
+    const key = scanAddress(item);
+    return scanSelected.has(key) && !known.has(key);
+  });
+  if (!chosen.length) {
+    toast("Выберите принтеры.", "warn");
+    return;
+  }
+  const fallbackUi = scanUiPortEl && validPort(Number(scanUiPortEl.value)) ? Number(scanUiPortEl.value) : 4408;
+  const printers = chosen.map(function (item) {
+    const uiPort = Number(item.ui_port);
+    const port = Number(item.port);
+    return {
+      name: String(item.name || scanAddress(item)),
+      host: String(item.host || "").trim(),
+      port: Number.isFinite(port) && port > 0 ? port : 7125,
+      mainsail_port: validPort(uiPort) ? uiPort : fallbackUi,
+    };
+  });
+  scanBusy = true;
+  if (scanRunEl) scanRunEl.disabled = true;
+  if (scanAddEl) scanAddEl.disabled = true;
+  setText(scanStatusEl, "Добавление принтеров…");
+  try {
+    const data = await requestJSON("/api/printers/import", {
+      method: "POST",
+      body: { printers: printers },
+      timeout: SCAN_TIMEOUT_MS,
+    });
+    const added = Number(data && data.added) || 0;
+    const skipped = Number(data && data.skipped) || 0;
+    const skippedText = skipped ? " Пропущено: " + skipped + "." : "";
+    toast("Добавлено: " + added + "." + skippedText, added ? "info" : "warn");
+    scanSelected.clear();
+    closeModal(modalScan);
+    await refreshState();
+  } catch (error) {
+    setText(scanStatusEl, errorText(error, "Не удалось добавить принтеры."));
+    toast(errorText(error, "Не удалось добавить принтеры."), "error");
+  } finally {
+    scanBusy = false;
+    if (scanRunEl) scanRunEl.disabled = false;
+    updateScanFooter();
+  }
+}
+
 async function sendFiles() {
   if (sendBusy) return;
   if (!state.selected.size) {
@@ -2172,6 +2383,11 @@ function bindCards() {
         printAction(key, "resume");
         return;
       }
+      if (action === "ui") {
+        closeCardMenus();
+        if (actionEl.getAttribute("aria-disabled") === "true") event.preventDefault();
+        return;
+      }
       if (action === "camera") {
         const record = cards.get(key);
         closeCardMenus();
@@ -2242,6 +2458,14 @@ function init() {
   filesNamesEl = document.getElementById("files-names");
   modalFiles = document.getElementById("modal-files");
   modalPrinters = document.getElementById("modal-printers");
+  modalScan = document.getElementById("modal-scan");
+  scanSubnetEl = document.getElementById("scan-subnet");
+  scanPortEl = document.getElementById("scan-port");
+  scanUiPortEl = document.getElementById("scan-ui-port");
+  scanRunEl = document.getElementById("scan-run");
+  scanStatusEl = document.getElementById("scan-status");
+  scanResultsEl = document.getElementById("scan-results");
+  scanAddEl = document.getElementById("scan-add");
   modalError = document.getElementById("modal-error");
   modalConfirm = document.getElementById("modal-confirm");
   modalRename = document.getElementById("modal-rename");
@@ -2378,6 +2602,17 @@ function init() {
   if (openFilesButton) openFilesButton.addEventListener("click", openFilesModal);
   const openPrintersButton = document.getElementById("open-printers");
   if (openPrintersButton) openPrintersButton.addEventListener("click", openPrintersModal);
+  const scanNetworkButton = document.getElementById("scan-network");
+  if (scanNetworkButton) scanNetworkButton.addEventListener("click", openScanModal);
+  if (scanRunEl) scanRunEl.addEventListener("click", runScan);
+  if (scanAddEl) scanAddEl.addEventListener("click", importScanResults);
+  if (scanSubnetEl) {
+    scanSubnetEl.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      runScan();
+    });
+  }
 
   if (fsUpEl) {
     fsUpEl.addEventListener("click", function () {

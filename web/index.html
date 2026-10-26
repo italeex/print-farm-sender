@@ -35,6 +35,10 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4z"/></svg>
       Принтеры
     </button>
+    <button class="btn" id="scan-network" type="button">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h.01"/><path d="M5 15a10 10 0 0 1 14 0"/><path d="M8.5 11.5a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>
+      Сканировать сеть
+    </button>
     <button class="btn ghost" id="compact-toggle" type="button" aria-pressed="false" title="Компактный вид (C)">
       Компактно
     </button>
@@ -191,6 +195,41 @@
   </div>
 </div>
 
+<div class="modal" id="modal-scan" role="dialog" aria-modal="true" aria-labelledby="modal-scan-title" hidden>
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2 id="modal-scan-title">Сканировать сеть</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="field-row">
+        <div class="field">
+          <label for="scan-subnet">Подсеть</label>
+          <input id="scan-subnet" type="text" placeholder="авто: определится по локальной сети" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field narrow">
+          <label for="scan-port">Moonraker</label>
+          <input id="scan-port" type="number" min="1" max="65535" value="7125">
+        </div>
+        <div class="field narrow">
+          <label for="scan-ui-port">UI</label>
+          <input id="scan-ui-port" type="number" min="1" max="65535" value="4408">
+        </div>
+      </div>
+      <div class="scan-actions">
+        <button class="btn primary" id="scan-run" type="button">Сканировать</button>
+        <span class="scan-status" id="scan-status" role="status" aria-live="polite"></span>
+      </div>
+      <ul class="scan-results" id="scan-results" aria-label="Найденные принтеры"></ul>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close>Закрыть</button>
+      <button class="btn primary" id="scan-add" type="button" disabled>Добавить выбранные</button>
+    </footer>
+  </div>
+</div>
+
 <div class="modal" id="modal-error" role="dialog" aria-modal="true" aria-labelledby="modal-error-title" hidden>
   <div class="modal-card">
     <header class="modal-head">
@@ -304,7 +343,7 @@
       <div class="card-foot">
         <a class="link-btn" data-field="mainsail" target="_blank" rel="noopener noreferrer" aria-disabled="true">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
-          Mainsail
+          <span data-field="mainsail-label">Mainsail</span>
         </a>
         <a class="link-btn camera-link" data-field="camera" target="_blank" rel="noopener noreferrer" aria-disabled="true">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 10.5 21 7v10l-6-3.5"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
@@ -316,6 +355,7 @@
       </div>
       <div class="card-menu" data-field="card-menu" hidden>
         <button type="button" data-action="rename">Переименовать</button>
+        <a data-action="ui" data-field="mainsail-menu" target="_blank" rel="noopener noreferrer">Открыть интерфейс</a>
         <button type="button" data-action="camera">Открыть камеру</button>
         <button type="button" data-action="cancel-print">Отменить печать</button>
       </div>
