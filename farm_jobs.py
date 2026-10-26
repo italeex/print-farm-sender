@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 from pathlib import Path
 from typing import Callable, Sequence
@@ -8,12 +9,15 @@ from typing import Callable, Sequence
 from farm_core import (
     BatchSender,
     FileProgressEvent,
+    FileResultEvent,
     FinishedEvent,
     OverallEvent,
     Printer,
     PrinterStatusEvent,
     validate_files,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 class JobError(Exception):
@@ -29,7 +33,13 @@ def _initial_state(printers: Sequence[Printer], files: Sequence[Path]) -> dict:
         "files_processed": 0,
         "aggregate_speed": 0.0,
         "per_printer": {
-            printer.key: {"status": "ожидание", "file": "", "progress": 0.0, "speed": 0.0}
+            printer.key: {
+                "status": "ожидание",
+                "file": "",
+                "progress": 0.0,
+                "speed": 0.0,
+                "last_error": "",
+            }
             for printer in printers
         },
         "finished": False,
@@ -46,6 +56,7 @@ class JobManager:
         self._lock = threading.Lock()
         self._sender: BatchSender | None = None
         self._cancel_event = threading.Event()
+        self._generation = 0
         self._state = _initial_state([], [])
 
     @property
@@ -65,21 +76,32 @@ class JobManager:
             if self._state["running"]:
                 raise JobError("Отправка уже идёт.")
             cancel_event = threading.Event()
-            sender = BatchSender(printers, files, self._on_event, cancel_event)
+            self._generation += 1
+            generation = self._generation
+            sender = BatchSender(
+                printers,
+                files,
+                lambda event: self._on_event(event, generation),
+                cancel_event,
+            )
             self._sender = sender
             self._cancel_event = cancel_event
             self._state = _initial_state(printers, files)
             self._state["running"] = True
-        sender.start()
+        try:
+            sender.start()
+        except Exception:
+            with self._lock:
+                self._state["running"] = False
+                self._sender = None
+            raise
 
     def cancel(self) -> None:
         with self._lock:
-            self._cancel_event.set()
-            if self._state["running"] or self._state["finished"]:
-                self._state["cancelling"] = True
-            if self._state["finished"]:
-                self._state["cancelled"] = True
-        sender = self._sender
+            if not self._state["running"]:
+                return
+            self._state["cancelling"] = True
+            sender = self._sender
         if sender is not None:
             sender.cancel()
 
@@ -87,12 +109,20 @@ class JobManager:
         with self._lock:
             return copy.deepcopy(self._state)
 
-    def _on_event(self, event: object) -> None:
+    def _on_event(self, event: object, generation: int | None = None) -> None:
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             if isinstance(event, PrinterStatusEvent):
                 row = self._state["per_printer"].get(event.printer_key)
                 if row is not None:
                     row["status"] = event.text
+                    if event.text == "готово":
+                        row["progress"] = 100.0
+                        row["speed"] = 0.0
+                    elif event.text == "отменено" or event.text.startswith("ошибка"):
+                        row["progress"] = 0.0
+                        row["speed"] = 0.0
             elif isinstance(event, FileProgressEvent):
                 row = self._state["per_printer"].get(event.printer_key)
                 if row is not None:
@@ -104,6 +134,10 @@ class JobManager:
                     row["file"] = event.file_name
                     row["progress"] = round(percent, 1)
                     row["speed"] = event.speed_bps
+            elif isinstance(event, FileResultEvent):
+                row = self._state["per_printer"].get(event.printer_key)
+                if row is not None and not event.ok:
+                    row["last_error"] = event.message
             elif isinstance(event, OverallEvent):
                 self._state["printers_done"] = event.printers_done
                 self._state["printers_total"] = event.printers_total
@@ -122,4 +156,4 @@ class JobManager:
             try:
                 self.on_event(event)
             except Exception:
-                pass
+                LOGGER.exception("Ошибка обработчика события задачи")
