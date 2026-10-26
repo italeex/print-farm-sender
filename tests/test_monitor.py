@@ -4,9 +4,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from farm_core import Printer
+from farm_core import AppConfig, Printer
 from farm_errors import ErrorInfo
-from farm_monitor import PrinterView, build_view, summarize
+from farm_monitor import FarmMonitor, PrinterView, build_view, summarize
+from farm_thumbs import ThumbCache
+from tests.fake_moonraker import FakeMoonraker
 
 
 def make_view(state, **kwargs):
@@ -103,6 +105,110 @@ class SummaryTests(unittest.TestCase):
             (2, 1, 1, 1, 1),
         )
         self.assertEqual(summary.nearest_finish, 50)
+
+
+class PollerTests(unittest.TestCase):
+    def make_monitor(self, server, interval=5):
+        printer = Printer("test", "127.0.0.1", server.port)
+        config = AppConfig(printers=[printer], refresh_seconds=interval)
+        monitor = FarmMonitor(config, thumb_cache=ThumbCache(), interval=interval)
+        monitor.set_printers(config.printers)
+        return monitor
+
+    def test_poll_once_builds_snapshot(self):
+        server = FakeMoonraker(thumb=b"\x89PNG\r\n\x1a\nx").start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        snapshot = monitor.snapshot()
+        view = snapshot["printers"][0]
+        self.assertEqual(view["state"], "printing")
+        self.assertTrue(view["thumb_version"])
+        self.assertEqual(snapshot["summary"]["printing"], 1)
+        self.assertIn("updated_at", snapshot)
+
+    def test_offline_backoff(self):
+        server = FakeMoonraker(failures=1).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        self.assertEqual(monitor.snapshot()["printers"][0]["state"], "offline")
+        monitor.poll_once()
+        self.assertEqual(server.request_count("/printer/info"), 1)
+        monitor._next_due["127.0.0.1:%d" % server.port] = 0
+        monitor.poll_once()
+        self.assertEqual(monitor.snapshot()["printers"][0]["state"], "printing")
+
+    def test_klipper_error_not_offline(self):
+        server = FakeMoonraker(info={"state": "shutdown", "state_message": "MCU shutdown"}, objects=None).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "error")
+        self.assertTrue(view["online"])
+
+    def test_stop_is_clean(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.start()
+        monitor.stop()
+        self.assertFalse(monitor.running)
+
+    def test_garbage_log_line_does_not_kill_poll(self):
+        server = FakeMoonraker(info={"state": "error", "state_message": ""}, log_tail="!! []\n").start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "error")
+        self.assertTrue(view["online"])
+        self.assertIsNotNone(view["error"])
+
+    def test_error_persists_until_recovery(self):
+        server = FakeMoonraker(info={"state": "shutdown", "state_message": "MCU shutdown"}).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        first = monitor.snapshot()["printers"][0]
+        self.assertEqual(first["state"], "error")
+        self.assertIsNotNone(first["error"])
+        server.info = {"state": "ready", "state_message": "Printer is ready"}
+        monitor.refresh()
+        second = monitor.snapshot()["printers"][0]
+        self.assertEqual(second["state"], "printing")
+        self.assertIsNone(second["error"])
+
+    def test_offline_keeps_last_seen(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        printer = Printer("test", "127.0.0.1", server.port)
+        config = AppConfig(printers=[printer], refresh_seconds=5)
+        ticks = iter([100.0, 200.0])
+        monitor = FarmMonitor(config, thumb_cache=ThumbCache(), interval=5, clock=lambda: next(ticks))
+        monitor.set_printers(config.printers)
+        monitor.poll_once()
+        self.assertEqual(monitor.snapshot()["printers"][0]["last_seen"], 100.0)
+        server.stop()
+        monitor._next_due[printer.key] = 0
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "offline")
+        self.assertEqual(view["last_seen"], 100.0)
+
+    def test_complete_print_still_loads_thumb(self):
+        server = FakeMoonraker(
+            objects={"print_stats": {"state": "complete", "filename": "part.gcode"}},
+            thumb=b"\x89PNG\r\n\x1a\nx",
+        ).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "idle")
+        self.assertEqual(view["file"], "part.gcode")
+        self.assertTrue(view["thumb_version"])
 
 
 if __name__ == "__main__":

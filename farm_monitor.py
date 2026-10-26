@@ -1,13 +1,32 @@
-from dataclasses import dataclass
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, replace
 
-from farm_core import Printer
-from farm_errors import ErrorInfo
+import requests
+
+from farm_core import AppConfig, Printer
+from farm_errors import ErrorInfo, parse_error
+from farm_thumbs import ThumbCache, thumbnail_from_http
 
 PRINT_STATE_MAP = {
     "printing": "printing",
     "paused": "paused",
     "error": "error",
 }
+
+INFO_PATH = "/printer/info"
+OBJECTS_PATH = "/printer/objects/query?print_stats&virtual_sdcard&extruder&heater_bed&display_status"
+LOG_PATH = "/server/files/logs/klippy.log"
+LOG_RANGE = "bytes=-65536"
+INFO_TIMEOUT = 2.5
+OBJECTS_TIMEOUT = 2.5
+LOG_TIMEOUT = 3.0
+MAX_WORKERS = 16
+BACKOFF_BASE = 10.0
+BACKOFF_CAP = 60.0
+LOOP_STEP = 0.5
+JOIN_TIMEOUT = 3.0
 
 
 @dataclass(frozen=True)
@@ -117,3 +136,212 @@ def summarize(views) -> FarmSummary:
         offline=counts["offline"],
         nearest_finish=min(etas) if etas else None,
     )
+
+
+class FarmMonitor:
+    def __init__(self, config: AppConfig, *, thumb_cache: ThumbCache, interval=None, clock=time.time) -> None:
+        self._thumb_cache = thumb_cache
+        self._interval = float(interval if interval is not None else config.refresh_seconds)
+        self._clock = clock
+        self._printers = list(config.printers)
+        self._views: dict[str, PrinterView] = {}
+        self._next_due: dict[str, float] = {printer.key: 0.0 for printer in self._printers}
+        self._failures: dict[str, int] = {}
+        self._last_error: dict[str, ErrorInfo] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._pool = None
+        self._local = threading.local()
+        self._updated_at = 0.0
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="farm-monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None:
+            thread.join(JOIN_TIMEOUT)
+        pool = self._pool
+        self._pool = None
+        if pool is not None:
+            pool.shutdown(wait=False)
+
+    def set_printers(self, printers) -> None:
+        printers = list(printers)
+        keys = {printer.key for printer in printers}
+        with self._lock:
+            self._printers = printers
+            for printer in printers:
+                self._next_due[printer.key] = 0.0
+            for mapping in (self._views, self._next_due, self._failures, self._last_error):
+                for key in list(mapping):
+                    if key not in keys:
+                        del mapping[key]
+
+    def refresh(self) -> None:
+        with self._lock:
+            for printer in self._printers:
+                self._next_due[printer.key] = 0.0
+        if not self.running:
+            self.poll_once()
+
+    def poll_once(self) -> None:
+        now = self._clock()
+        with self._lock:
+            due = [printer for printer in self._printers if self._next_due.get(printer.key, 0.0) <= now]
+        if not due:
+            return
+        pool = self._ensure_pool()
+        futures = [(printer, pool.submit(self._fetch, printer)) for printer in due]
+        for printer, future in futures:
+            try:
+                result = future.result()
+                with self._lock:
+                    self._apply(printer, result, now)
+            except Exception:
+                try:
+                    with self._lock:
+                        self._apply(printer, (None, None, "", None, ""), now)
+                except Exception:
+                    pass
+        with self._lock:
+            self._updated_at = now
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            views = [self._views[printer.key] for printer in self._printers if printer.key in self._views]
+            updated_at = self._updated_at
+        return {
+            "printers": [asdict(view) for view in views],
+            "summary": asdict(summarize(views)),
+            "updated_at": updated_at,
+        }
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._stop.wait(LOOP_STEP)
+            if self._stop.is_set():
+                break
+            try:
+                self.poll_once()
+            except Exception:
+                pass
+
+    def _ensure_pool(self):
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        return self._pool
+
+    def _session(self):
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._local.session = session
+        return session
+
+    def _fetch(self, printer):
+        session = self._session()
+        try:
+            info = self._fetch_info(session, printer)
+        except Exception as exc:
+            return None, None, str(exc), None, ""
+        try:
+            status = self._fetch_objects(session, printer)
+        except Exception as exc:
+            return None, None, str(exc), None, ""
+        print_stats = status.get("print_stats") or {}
+        state_name = str(info.get("state") or "")
+        error_info = None
+        if state_name in ("error", "shutdown") or print_stats.get("state") == "error":
+            parse_state = state_name if state_name in ("error", "shutdown") else "error"
+            error_info = self._collect_error(session, printer, parse_state, str(info.get("state_message") or ""))
+        filename = str(print_stats.get("filename") or "")
+        thumb_version = ""
+        if filename:
+            thumb_version = self._load_thumb(session, printer, filename)
+        return info, status, "", error_info, thumb_version
+
+    def _collect_error(self, session, printer, state_name, state_message):
+        try:
+            log_tail = self._fetch_log_tail(session, printer)
+            return parse_error(state_message, state=state_name, log_tail=log_tail)
+        except Exception:
+            return parse_error(state_message, state=state_name)
+
+    def _fetch_info(self, session, printer):
+        payload = self._get_json(session, printer.base_url + INFO_PATH, INFO_TIMEOUT)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("ожидался объект result")
+        return result
+
+    def _fetch_objects(self, session, printer):
+        payload = self._get_json(session, printer.base_url + OBJECTS_PATH, OBJECTS_TIMEOUT)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("ожидался объект result")
+        status = result.get("status")
+        if not isinstance(status, dict):
+            raise ValueError("ожидался объект status")
+        return status
+
+    def _fetch_log_tail(self, session, printer):
+        response = session.get(
+            printer.base_url + LOG_PATH,
+            headers={"Range": LOG_RANGE},
+            timeout=LOG_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.text
+
+    def _get_json(self, session, url, timeout):
+        response = session.get(url, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("ожидался JSON-объект")
+        return payload
+
+    def _load_thumb(self, session, printer, filename):
+        def load():
+            return thumbnail_from_http(session, printer.base_url, filename)
+
+        cache_key = (printer.key, filename)
+        self._thumb_cache.get(cache_key, load)
+        return self._thumb_cache.version(cache_key)
+
+    def _apply(self, printer, result, now) -> None:
+        info, status, _, error_info, thumb_version = result
+        key = printer.key
+        previous = self._views.get(key)
+        if info is None:
+            failures = self._failures.get(key, 0) + 1
+            self._failures[key] = failures
+            self._next_due[key] = now + min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (failures - 1))
+            view = build_view(printer, info=None, status=None, now=now, error=self._last_error.get(key), thumb_version="")
+            if previous is not None:
+                view = replace(view, last_seen=previous.last_seen, thumb_version=previous.thumb_version)
+            self._views[key] = view
+            return
+        self._failures[key] = 0
+        self._next_due[key] = now + self._interval
+        error = error_info if error_info is not None else self._last_error.get(key)
+        view = build_view(printer, info=info, status=status, now=now, error=error, thumb_version=thumb_version)
+        if view.state in ("printing", "idle"):
+            self._last_error.pop(key, None)
+            if error is not None:
+                view = replace(view, error=None)
+        elif error is not None:
+            self._last_error[key] = error
+        self._views[key] = view
