@@ -49,6 +49,7 @@ NO_CACHE = "no-cache, no-store, must-revalidate"
 IMAGE_CACHE = "no-cache"
 BROWSE_TIMEOUT = 300.0
 NAME_MAX_LEN = 60
+APP_VERSION = "2.2.0"
 CONFIG_LOCK = threading.RLock()
 BROWSE_LOCK = threading.Lock()
 DIALOG_SCRIPT = """
@@ -188,6 +189,7 @@ class FarmApp:
     ) -> None:
         self.config_path = Path(config_path)
         self.idle_timeout = float(idle_timeout)
+        self.started_at = time.time()
         self.browse_files = browse_files if browse_files is not None else _native_browse_files
         self.journal = Journal()
         self.thumb_cache = ThumbCache()
@@ -242,6 +244,8 @@ class FarmApp:
             "last_dir": self.config.last_dir,
             "error": self.config_error,
         }
+        snapshot["version"] = APP_VERSION
+        snapshot["started_at"] = self.started_at
         return snapshot
 
     def should_shutdown(self, now: float) -> bool:
@@ -900,6 +904,27 @@ def find_running_instance(host: str, ports, timeout: float = 0.5) -> str | None:
     return None
 
 
+def read_instance_state(url: str, timeout: float = 1.0) -> dict | None:
+    try:
+        response = requests.get(f"{url}/api/state", timeout=timeout)
+    except Exception:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def stop_instance(url: str, timeout: float = 2.0) -> None:
+    try:
+        requests.post(f"{url}/api/shutdown", timeout=timeout)
+    except Exception:
+        pass
+
+
 def configure_logging(path: Path) -> None:
     path = Path(path)
     logger = logging.getLogger()
@@ -923,9 +948,17 @@ def main() -> int:
     configure_logging(APP_DIR / "farm.log")
     existing = find_running_instance("127.0.0.1", PORT_RANGE)
     if existing:
-        LOGGER.info("Панель уже запущена: %s", existing)
-        webbrowser.open(existing)
-        return 0
+        state = read_instance_state(existing)
+        if state and state.get("version") == APP_VERSION:
+            LOGGER.info("Панель уже запущена: %s", existing)
+            webbrowser.open(existing)
+            return 0
+        LOGGER.warning("Найден устаревший экземпляр %s — перезапускаем", existing)
+        stop_instance(existing)
+        for _ in range(50):
+            if find_running_instance("127.0.0.1", PORT_RANGE, timeout=0.1) is None:
+                break
+            time.sleep(0.1)
     app = FarmApp(start_monitor=True)
     server = None
     for port in PORT_RANGE:

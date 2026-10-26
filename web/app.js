@@ -12,6 +12,7 @@ const COMPACT_KEY = "farm.compact";
 const GROUPED_KEY = "farm.grouped";
 const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
+const EXPECTED_SERVER_VERSION = "2.2.0";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
@@ -134,6 +135,7 @@ let renameMode = "single";
 let renameKey = "";
 let renameBusy = false;
 let browseBusy = false;
+let staleServerWarned = false;
 
 function pick(root, selectors) {
   for (const selector of selectors) {
@@ -435,6 +437,10 @@ async function fetchState() {
     state.summary = data.summary || {};
     state.job = data.job || {};
     state.config = data.config || {};
+    if (!staleServerWarned && data.version !== EXPECTED_SERVER_VERSION) {
+      staleServerWarned = true;
+      toast("Сервер запущен со старой версией. Перезапустите приложение.", "warn");
+    }
     state.lastDir = typeof state.config.last_dir === "string" ? state.config.last_dir : "";
     const refreshSeconds = Number(state.config.refresh_seconds);
     if (Number.isFinite(refreshSeconds) && refreshSeconds > 0) {

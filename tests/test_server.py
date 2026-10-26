@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests
 
 from farm_monitor import PrinterView, summarize
-from farm_server import FarmApp, Journal, create_server, find_running_instance
+from farm_server import APP_VERSION, FarmApp, Journal, create_server, find_running_instance
 from tests.fake_moonraker import FakeMoonraker, gcode_with_thumb
 
 
@@ -49,6 +49,15 @@ class ServerTests(unittest.TestCase):
         response = requests.get(self.url("/api/state"), timeout=3)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["printing"], 1)
+
+    def test_state_includes_version(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "printers.json"
+            path.write_text('{"printers": []}', encoding="utf-8")
+            app = FarmApp(config_path=path, start_monitor=False)
+            snapshot = app.state_snapshot()
+        self.assertEqual(snapshot["version"], APP_VERSION)
+        self.assertIsInstance(snapshot["started_at"], float)
 
     def test_journal_json(self):
         self.app.journal.add("проверка журнала")
