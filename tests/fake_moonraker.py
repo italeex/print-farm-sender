@@ -74,6 +74,9 @@ class FakeMoonraker:
                         return
                     self._send_json({"result": fake.info})
                     return
+                if path == "/server/info":
+                    self._send_json({"result": {"klipper_connected": True}})
+                    return
                 if path == "/printer/objects/query":
                     if fake.objects is None:
                         self.send_error(500)
@@ -129,3 +132,44 @@ class FakeMoonraker:
     @property
     def request_paths(self):
         return list(self.requests)
+
+
+class FakeUI:
+    def __init__(self, html="<html><head><title>Mainsail</title></head><body></body></html>"):
+        self.html = html
+        self.port = 0
+        self.user_agents = []
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                fake.user_agents.append(self.headers.get("User-Agent") or "")
+                body = fake.html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+

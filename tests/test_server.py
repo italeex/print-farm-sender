@@ -219,6 +219,7 @@ class ApiTests(unittest.TestCase):
             port=self.moonraker.port,
             mainsail_url="http://127.0.0.1:4408",
             mainsail_port=4408,
+            ui_kind="mainsail",
             online=True,
             state="printing",
             file="деталь.gcode",
@@ -510,6 +511,148 @@ class ApiTests(unittest.TestCase):
         update = requests.put(self.printer_url(self.key), json={"name": too_long}, timeout=3)
         self.assertEqual(update.status_code, 400)
         self.assertIn("длиннее", update.json()["error"])
+
+    def test_scan_default_subnet(self):
+        calls = []
+
+        def scan_stub(*, subnet, moonraker_port, ui_port):
+            calls.append((subnet, moonraker_port, ui_port))
+            return {
+                "subnet": subnet,
+                "scanned": 254,
+                "found": [
+                    {
+                        "host": "192.168.7.158",
+                        "port": moonraker_port,
+                        "name": "K1",
+                        "ui_kind": "fluidd",
+                        "ui_port": ui_port,
+                    }
+                ],
+            }
+
+        self.app.scan_func = scan_stub
+        response = requests.post(self.url("/api/scan"), json={}, timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["scanned"], 254)
+        self.assertEqual(payload["found"][0]["ui_kind"], "fluidd")
+        subnet, moonraker_port, ui_port = calls[0]
+        self.assertTrue(subnet.endswith("/24"))
+        self.assertEqual((moonraker_port, ui_port), (7125, 4408))
+
+    def test_scan_accepts_subnet_and_ports(self):
+        calls = []
+
+        def scan_stub(*, subnet, moonraker_port, ui_port):
+            calls.append((subnet, moonraker_port, ui_port))
+            return {"subnet": subnet, "scanned": 4, "found": []}
+
+        self.app.scan_func = scan_stub
+        response = requests.post(
+            self.url("/api/scan"),
+            json={"subnet": "192.168.7.0/24", "moonraker_port": 7000, "ui_port": 5000},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [("192.168.7.0/24", 7000, 5000)])
+        self.assertEqual(response.json(), {"subnet": "192.168.7.0/24", "scanned": 4, "found": []})
+
+    def test_scan_errors_return_400(self):
+        def bad_subnet(*, subnet, moonraker_port, ui_port):
+            raise ValueError("Некорректная подсеть: 8.8.8.0/24")
+
+        self.app.scan_func = bad_subnet
+        response = requests.post(self.url("/api/scan"), json={"subnet": "8.8.8.0/24"}, timeout=5)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("подсеть", response.json()["error"].lower())
+
+        def broken(*, subnet, moonraker_port, ui_port):
+            raise OSError("сеть недоступна")
+
+        self.app.scan_func = broken
+        failed = requests.post(self.url("/api/scan"), json={}, timeout=5)
+        self.assertEqual(failed.status_code, 400)
+        self.assertIn("сеть", failed.json()["error"])
+
+    def test_scan_validates_body(self):
+        not_string = requests.post(self.url("/api/scan"), json={"subnet": 5}, timeout=5)
+        self.assertEqual(not_string.status_code, 400)
+        self.assertIn("строкой", not_string.json()["error"])
+        bad_port = requests.post(self.url("/api/scan"), json={"ui_port": 0}, timeout=5)
+        self.assertEqual(bad_port.status_code, 400)
+        self.assertIn("Порт", bad_port.json()["error"])
+
+    def test_scan_single_flight(self):
+        started = threading.Event()
+        release = threading.Event()
+        responses = {}
+
+        def blocking(*, subnet, moonraker_port, ui_port):
+            started.set()
+            release.wait(10)
+            return {"subnet": subnet, "scanned": 1, "found": []}
+
+        self.addCleanup(release.set)
+        self.app.scan_func = blocking
+
+        def first_call():
+            responses["first"] = requests.post(self.url("/api/scan"), json={}, timeout=10)
+
+        thread = threading.Thread(target=first_call, daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(5))
+        second = requests.post(self.url("/api/scan"), json={}, timeout=3)
+        self.assertEqual(second.status_code, 409)
+        self.assertIn("Сканирование уже идёт", second.json()["error"])
+        release.set()
+        thread.join(10)
+        self.assertEqual(responses["first"].status_code, 200)
+
+    def test_import_printers(self):
+        response = requests.post(
+            self.url("/api/printers/import"),
+            json={
+                "printers": [
+                    {"name": "Тест", "host": "127.0.0.1", "port": self.moonraker.port},
+                    {"name": "Новый", "host": "10.0.0.30", "port": 7125, "mainsail_port": 4408},
+                    {"name": "Дубль", "host": "10.0.0.30", "port": 7125},
+                ]
+            },
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["added"], 1)
+        self.assertEqual(payload["skipped"], 2)
+        hosts = [item["host"] for item in self.saved_config()["printers"]]
+        self.assertEqual(hosts.count("10.0.0.30"), 1)
+        self.assertIn("10.0.0.30:7125", [printer.key for printer in self.monitor.printers])
+        self.assertIn("10.0.0.30:7125", [printer.key for printer in self.app.config.printers])
+
+    def test_import_validates_payload(self):
+        empty = requests.post(self.url("/api/printers/import"), json={"printers": []}, timeout=3)
+        self.assertEqual(empty.status_code, 400)
+        missing_host = requests.post(
+            self.url("/api/printers/import"),
+            json={"printers": [{"name": "Без адреса"}]},
+            timeout=3,
+        )
+        self.assertEqual(missing_host.status_code, 400)
+        self.assertIn("адрес", missing_host.json()["error"])
+        too_long = requests.post(
+            self.url("/api/printers/import"),
+            json={"printers": [{"name": "я" * 61, "host": "10.0.0.31"}]},
+            timeout=3,
+        )
+        self.assertEqual(too_long.status_code, 400)
+        self.assertIn("длиннее", too_long.json()["error"])
+        bad_list = requests.post(
+            self.url("/api/printers/import"),
+            json={"printers": "нет"},
+            timeout=3,
+        )
+        self.assertEqual(bad_list.status_code, 400)
 
     def test_bulk_rename_persists(self):
         created = requests.post(

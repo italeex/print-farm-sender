@@ -8,6 +8,7 @@ import requests
 
 from farm_core import AppConfig, Printer
 from farm_errors import ErrorInfo, parse_error
+from farm_net import detect_ui
 from farm_thumbs import ThumbCache, load_thumbnail
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ BACKOFF_BASE = 10.0
 BACKOFF_CAP = 60.0
 LOOP_STEP = 0.5
 JOIN_TIMEOUT = 3.0
+UI_KIND_TTL = 30.0
+UI_KIND_TIMEOUT = 2.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class PrinterView:
     port: int
     mainsail_url: str
     mainsail_port: int
+    ui_kind: str
     online: bool
     state: str
     file: str
@@ -105,7 +109,7 @@ def _finish_fields(state, print_stats, cur_print_data, metadata, progress, now):
     return None, None
 
 
-def build_view(printer: Printer, *, info, status, now, error, thumb_version) -> PrinterView:
+def build_view(printer: Printer, *, info, status, now, error, thumb_version, ui_kind="") -> PrinterView:
     online = info is not None
     print_stats = (status or {}).get("print_stats") or {}
     if not online:
@@ -128,6 +132,7 @@ def build_view(printer: Printer, *, info, status, now, error, thumb_version) -> 
         port=printer.port,
         mainsail_url=printer.mainsail_url,
         mainsail_port=printer.mainsail_port,
+        ui_kind=ui_kind,
         online=online,
         state=state,
         file=print_stats.get("filename") or "",
@@ -163,15 +168,20 @@ def summarize(views) -> FarmSummary:
 
 
 class FarmMonitor:
-    def __init__(self, config: AppConfig, *, thumb_cache: ThumbCache, interval=None, clock=time.time) -> None:
+    def __init__(
+        self, config: AppConfig, *, thumb_cache: ThumbCache, interval=None, clock=time.time, ui_detect=None
+    ) -> None:
         self._thumb_cache = thumb_cache
         self._interval = float(interval if interval is not None else config.refresh_seconds)
         self._clock = clock
+        self._detect_ui = ui_detect if ui_detect is not None else detect_ui
         self._printers = list(config.printers)
         self._views: dict[str, PrinterView] = {}
         self._next_due: dict[str, float] = {printer.key: 0.0 for printer in self._printers}
         self._failures: dict[str, int] = {}
         self._last_error: dict[str, ErrorInfo] = {}
+        self._ui_kind: dict[str, str] = {}
+        self._ui_checked: dict[str, float] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -226,7 +236,7 @@ class FarmMonitor:
             self._printers = printers
             for printer in printers:
                 self._next_due[printer.key] = 0.0
-            for mapping in (self._views, self._next_due, self._failures, self._last_error):
+            for mapping in (self._views, self._next_due, self._failures, self._last_error, self._ui_kind, self._ui_checked):
                 for key in list(mapping):
                     if key not in keys:
                         del mapping[key]
@@ -252,7 +262,7 @@ class FarmMonitor:
                 result = future.result()
             except Exception:
                 LOGGER.exception("Опрос принтера %s завершился ошибкой", printer.name)
-                result = (None, None, "", None, "")
+                result = (None, None, "", None, "", "")
             filename = ""
             try:
                 with self._lock:
@@ -315,7 +325,8 @@ class FarmMonitor:
         try:
             info = self._fetch_info(session, printer)
         except Exception as exc:
-            return None, None, str(exc), None, ""
+            return None, None, str(exc), None, "", ""
+        ui_kind = self._ui_kind_for(printer)
         try:
             status = self._fetch_objects(session, printer)
         except Exception as exc:
@@ -323,14 +334,32 @@ class FarmMonitor:
             error_info = None
             if state_name in ("error", "shutdown"):
                 error_info = self._collect_error(session, printer, state_name, str(info.get("state_message") or ""))
-            return info, None, str(exc), error_info, ""
+            return info, None, str(exc), error_info, "", ui_kind
         print_stats = status.get("print_stats") or {}
         state_name = str(info.get("state") or "")
         error_info = None
         if state_name in ("error", "shutdown") or print_stats.get("state") == "error":
             parse_state = state_name if state_name in ("error", "shutdown") else "error"
             error_info = self._collect_error(session, printer, parse_state, str(info.get("state_message") or ""))
-        return info, status, "", error_info, ""
+        return info, status, "", error_info, "", ui_kind
+
+    def _ui_kind_for(self, printer) -> str:
+        now = self._clock()
+        with self._lock:
+            checked = self._ui_checked.get(printer.key)
+            if checked is not None and now - checked <= UI_KIND_TTL:
+                return self._ui_kind.get(printer.key, "unknown")
+        kind = "unknown"
+        try:
+            detected = self._detect_ui(printer.host, printer.mainsail_port, timeout=UI_KIND_TIMEOUT)
+            if detected in ("fluidd", "mainsail"):
+                kind = detected
+        except Exception:
+            kind = "unknown"
+        with self._lock:
+            self._ui_kind[printer.key] = kind
+            self._ui_checked[printer.key] = now
+        return kind
 
     def _collect_error(self, session, printer, state_name, state_message):
         try:
@@ -411,7 +440,7 @@ class FarmMonitor:
                 self._thumb_pending.discard(cache_key)
 
     def _apply(self, printer, result) -> str:
-        info, status, reason, error_info, _thumb = result
+        info, status, reason, error_info, _thumb, ui_kind = result
         key = printer.key
         if key not in {item.key for item in self._printers}:
             return ""
@@ -425,7 +454,7 @@ class FarmMonitor:
             self._next_due[key] = now + min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (failures - 1))
             view = build_view(printer, info=None, status=None, now=now, error=self._last_error.get(key), thumb_version="")
             if previous is not None:
-                view = replace(view, last_seen=previous.last_seen, thumb_version=previous.thumb_version)
+                view = replace(view, last_seen=previous.last_seen, thumb_version=previous.thumb_version, ui_kind=previous.ui_kind)
             self._views[key] = view
             return ""
         self._failures[key] = 0
@@ -442,16 +471,16 @@ class FarmMonitor:
                     detail=reason,
                 )
             if previous is not None:
-                view = replace(previous, state="error", online=True, error=error, last_seen=now)
+                view = replace(previous, state="error", online=True, error=error, last_seen=now, ui_kind=ui_kind or previous.ui_kind)
             else:
-                view = build_view(printer, info=info, status=None, now=now, error=error, thumb_version="")
+                view = build_view(printer, info=info, status=None, now=now, error=error, thumb_version="", ui_kind=ui_kind)
             self._last_error[key] = error
             self._views[key] = view
             return ""
         filename = str((status.get("print_stats") or {}).get("filename") or "")
         thumb_version = self._thumb_cache.version((key, filename)) if filename else ""
         error = error_info if error_info is not None else self._last_error.get(key)
-        view = build_view(printer, info=info, status=status, now=now, error=error, thumb_version=thumb_version)
+        view = build_view(printer, info=info, status=status, now=now, error=error, thumb_version=thumb_version, ui_kind=ui_kind)
         if view.state in ("printing", "idle"):
             self._last_error.pop(key, None)
             if error is not None:

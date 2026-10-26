@@ -32,6 +32,7 @@ from farm_core import (
 )
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
+from farm_net import detect_ui, local_subnet, scan_subnet
 from farm_thumbs import ThumbCache, thumbnail_from_file
 
 LOGGER = logging.getLogger(__name__)
@@ -49,9 +50,10 @@ NO_CACHE = "no-cache, no-store, must-revalidate"
 IMAGE_CACHE = "no-cache"
 BROWSE_TIMEOUT = 300.0
 NAME_MAX_LEN = 60
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 CONFIG_LOCK = threading.RLock()
 BROWSE_LOCK = threading.Lock()
+SCAN_LOCK = threading.Lock()
 DIALOG_SCRIPT = """
 import json
 import sys
@@ -186,11 +188,15 @@ class FarmApp:
         start_monitor: bool = False,
         idle_timeout: float = IDLE_TIMEOUT,
         browse_files=None,
+        scan_func=None,
+        ui_detect_func=None,
     ) -> None:
         self.config_path = Path(config_path)
         self.idle_timeout = float(idle_timeout)
         self.started_at = time.time()
         self.browse_files = browse_files if browse_files is not None else _native_browse_files
+        self.scan_func = scan_func if scan_func is not None else scan_subnet
+        self.ui_detect_func = ui_detect_func if ui_detect_func is not None else detect_ui
         self.journal = Journal()
         self.thumb_cache = ThumbCache()
         self.config_error = ""
@@ -201,7 +207,7 @@ class FarmApp:
         if monitor is not None:
             self.monitor = monitor
         else:
-            self.monitor = FarmMonitor(self.config, thumb_cache=self.thumb_cache)
+            self.monitor = FarmMonitor(self.config, thumb_cache=self.thumb_cache, ui_detect=self.ui_detect_func)
         self.job = job if job is not None else JobManager(on_event=self.record_event)
         self.last_heartbeat = time.time()
         if start_monitor:
@@ -337,6 +343,12 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/printers/rename":
             self._api_printer_rename()
+            return
+        if path == "/api/printers/import":
+            self._api_printer_import()
+            return
+        if path == "/api/scan":
+            self._api_scan()
             return
         if path == "/api/printers":
             self._api_printer_create()
@@ -490,6 +502,82 @@ class FarmHandler(BaseHTTPRequestHandler):
                 "cancelled": not raw,
             }
         )
+
+    def _api_scan(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_subnet = payload.get("subnet")
+        if raw_subnet is None:
+            raw_subnet = ""
+        if not isinstance(raw_subnet, str):
+            self._send_error(400, "Поле subnet должно быть строкой")
+            return
+        moonraker_port = self._parse_port(payload.get("moonraker_port"), DEFAULT_PORT)
+        if moonraker_port is None:
+            return
+        ui_port = self._parse_port(payload.get("ui_port"), MAINSAIL_PORT)
+        if ui_port is None:
+            return
+        if not SCAN_LOCK.acquire(blocking=False):
+            self._send_error(409, "Сканирование уже идёт")
+            return
+        try:
+            subnet = raw_subnet.strip() or local_subnet()
+            result = self.app.scan_func(subnet=subnet, moonraker_port=moonraker_port, ui_port=ui_port)
+        except (ValueError, OSError) as exc:
+            self._send_error(400, str(exc) or "Не удалось сканировать подсеть")
+            return
+        except Exception:
+            LOGGER.exception("Сканирование подсети завершилось ошибкой")
+            self._send_error(500, "Сканирование не удалось")
+            return
+        finally:
+            SCAN_LOCK.release()
+        self._send_json(result)
+
+    def _api_printer_import(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_printers = payload.get("printers")
+        if not isinstance(raw_printers, list) or not raw_printers:
+            self._send_error(400, "Ожидался непустой список printers")
+            return
+        parsed: list[Printer] = []
+        seen: set[str] = set()
+        for item in raw_printers:
+            if not isinstance(item, dict):
+                self._send_error(400, "Некорректная запись принтера")
+                return
+            try:
+                printer = Printer.from_dict(item)
+            except (KeyError, TypeError, ValueError):
+                self._send_error(400, "У принтера не указан адрес")
+                return
+            if not printer.host:
+                self._send_error(400, "У принтера не указан адрес")
+                return
+            if len(printer.name) > NAME_MAX_LEN:
+                self._send_error(400, f"Имя принтера не должно быть длиннее {NAME_MAX_LEN} символов")
+                return
+            if printer.key in seen:
+                continue
+            seen.add(printer.key)
+            parsed.append(printer)
+        with CONFIG_LOCK:
+            previous = list(self.app.config.printers)
+            known = {printer.key for printer in previous}
+            added = [printer for printer in parsed if printer.key not in known]
+            skipped = len(raw_printers) - len(added)
+            if not added:
+                self._send_json({"added": 0, "skipped": skipped})
+                return
+            self.app.config.printers = previous + added
+            if not self._persist_printers(previous):
+                return
+        self.app.journal.add(f"Импортировано принтеров: {len(added)}")
+        self._send_json({"added": len(added), "skipped": skipped})
 
     def _api_file_thumb(self, query) -> None:
         raw = self._query_text(query, "path")

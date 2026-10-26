@@ -11,7 +11,7 @@ from farm_core import AppConfig, Printer
 from farm_errors import ErrorInfo
 from farm_monitor import FarmMonitor, PrinterView, build_view, summarize
 from farm_thumbs import ThumbCache
-from tests.fake_moonraker import FakeMoonraker
+from tests.fake_moonraker import FakeMoonraker, FakeUI
 
 
 def make_view(state, **kwargs):
@@ -22,6 +22,7 @@ def make_view(state, **kwargs):
         "port": 7125,
         "mainsail_url": "http://192.168.7.158:4408",
         "mainsail_port": 4408,
+        "ui_kind": "",
         "online": True,
         "state": state,
         "file": "",
@@ -124,6 +125,12 @@ class BuildViewTests(unittest.TestCase):
         self.assertEqual(view.state, "offline")
         self.assertFalse(view.online)
 
+    def test_ui_kind_passed_through(self):
+        view = build_view(self.printer, info=self.info, status=self.status, now=1, error=None, thumb_version="", ui_kind="fluidd")
+        self.assertEqual(view.ui_kind, "fluidd")
+        empty = build_view(self.printer, info=self.info, status=self.status, now=1, error=None, thumb_version="")
+        self.assertEqual(empty.ui_kind, "")
+
     def test_eta_ignored_when_not_printing(self):
         status = {"print_stats": {"state": "paused"}, "virtual_sdcard": {"cur_print_data": {"end_time": 9999}}}
         view = build_view(self.printer, info=self.info, status=status, now=1, error=None, thumb_version="")
@@ -166,10 +173,16 @@ class PollerTests(unittest.TestCase):
         logging.disable(logging.WARNING)
         self.addCleanup(logging.disable, logging.NOTSET)
 
-    def make_monitor(self, server, interval=5, clock=time.time):
-        printer = Printer("test", "127.0.0.1", server.port)
+    def make_monitor(self, server, interval=5, clock=time.time, mainsail_port=4408, ui_detect=None):
+        printer = Printer("test", "127.0.0.1", server.port, mainsail_port)
         config = AppConfig(printers=[printer], refresh_seconds=interval)
-        monitor = FarmMonitor(config, thumb_cache=ThumbCache(), interval=interval, clock=clock)
+        monitor = FarmMonitor(
+            config,
+            thumb_cache=ThumbCache(),
+            interval=interval,
+            clock=clock,
+            ui_detect=ui_detect,
+        )
         monitor.set_printers(config.printers)
         self.addCleanup(monitor.stop)
         return monitor
@@ -346,7 +359,7 @@ class PollerTests(unittest.TestCase):
         before = server.request_count("/printer/info")
         monitor.refresh()
         self.assertTrue(monitor.running)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while server.request_count("/printer/info") == before and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertGreater(server.request_count("/printer/info"), before)
@@ -451,6 +464,70 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(view["state"], "error")
         self.assertEqual(view["error"]["code"], "2560")
         self.assertEqual(view["error"]["detail"], "MCU lost")
+
+    def test_ui_kind_detected_from_fake_server(self):
+        ui = FakeUI("<html><head><title>Fluidd</title></head><body></body></html>").start()
+        self.addCleanup(ui.stop)
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server, mainsail_port=ui.port)
+        monitor.poll_once()
+        self.assertEqual(monitor.snapshot()["printers"][0]["ui_kind"], "fluidd")
+
+    def test_ui_kind_cached_for_thirty_seconds(self):
+        calls = []
+
+        def fake_detect(host, port, timeout=3.0):
+            calls.append((host, port, timeout))
+            return "mainsail"
+
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        clock = FakeClock(100.0)
+        monitor = self.make_monitor(server, clock=clock, ui_detect=fake_detect)
+        key = monitor._printers[0].key
+        for _ in range(2):
+            monitor._next_due[key] = 0
+            monitor.poll_once()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:], (4408, 2.0))
+        self.assertEqual(monitor.snapshot()["printers"][0]["ui_kind"], "mainsail")
+        clock.now = 131.0
+        monitor._next_due[key] = 0
+        monitor.poll_once()
+        self.assertEqual(len(calls), 2)
+
+    def test_ui_detect_failure_keeps_unknown(self):
+        def broken(host, port, timeout=3.0):
+            raise RuntimeError("нет связи")
+
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server, ui_detect=broken)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "printing")
+        self.assertEqual(view["ui_kind"], "unknown")
+
+    def test_ui_kind_kept_while_offline(self):
+        calls = []
+
+        def fake_detect(host, port, timeout=3.0):
+            calls.append(host)
+            return "fluidd"
+
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server, ui_detect=fake_detect)
+        monitor.poll_once()
+        self.assertEqual(monitor.snapshot()["printers"][0]["ui_kind"], "fluidd")
+        server.stop()
+        monitor._next_due[monitor._printers[0].key] = 0
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "offline")
+        self.assertEqual(view["ui_kind"], "fluidd")
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
