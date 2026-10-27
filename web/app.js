@@ -41,6 +41,11 @@ const UI_LABELS = {
   unknown: "Интерфейс",
 };
 const SCAN_TIMEOUT_MS = 60000;
+const PLAN_POLL_MS = 30000;
+const PLAN_PERIODS = ["day", "week", "month"];
+const HISTORY_RANGES = { "24h": 86400, "7d": 604800, "30d": 2592000 };
+const HISTORY_LIMIT = 500;
+const HISTORY_EVENT_LIMIT = 200;
 
 const state = {
   printers: [],
@@ -153,6 +158,27 @@ let renameKey = "";
 let renameBusy = false;
 let browseBusy = false;
 let staleServerWarned = false;
+let modalHistory = null;
+let historyTitleEl = null;
+let historyPillEl = null;
+let historyStateLabelEl = null;
+let historyLastEl = null;
+let historyTimelineEl = null;
+let historyEventsEl = null;
+let historySummaryEl = null;
+let historyRangesEl = null;
+let historyKey = "";
+let historyRange = "24h";
+let historyRequest = 0;
+let modalPlan = null;
+let planButtonEl = null;
+let planBadgeEl = null;
+let planSaveEl = null;
+let planStatusEl = null;
+let planData = null;
+let planBusy = false;
+let planEdited = false;
+const planInputs = {};
 
 function pick(root, selectors) {
   for (const selector of selectors) {
@@ -2328,6 +2354,327 @@ function setJournalOpen(value) {
   }
 }
 
+function historyBounds(range) {
+  const span = HISTORY_RANGES[range] || HISTORY_RANGES["24h"];
+  const until = Math.floor(Date.now() / 1000);
+  return { since: until - span, until: until };
+}
+
+function historyPartsText(parts) {
+  if (Array.isArray(parts)) {
+    return parts
+      .filter(function (part) {
+        return part && part.name;
+      })
+      .map(function (part) {
+        return String(part.name) + " × " + (Number(part.count) || 0);
+      })
+      .join(", ");
+  }
+  const count = Number(parts);
+  if (!Number.isFinite(count) || count <= 0) return "";
+  return count + " " + plural(count, "деталь", "детали", "деталей");
+}
+
+function historyView(key) {
+  const record = cards.get(key);
+  return record && record.view ? record.view : null;
+}
+
+function updateHistoryState(state) {
+  const known = state && STATE_LABELS[state] ? state : "";
+  if (historyPillEl) historyPillEl.className = "pill " + (known || "idle");
+  setText(historyStateLabelEl, known ? STATE_LABELS[known] : "—");
+}
+
+function syncHistoryRange() {
+  if (!historyRangesEl) return;
+  for (const button of historyRangesEl.querySelectorAll("[data-range]")) {
+    const active = button.dataset.range === historyRange;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function renderHistoryMessage(text) {
+  if (historyTimelineEl) {
+    historyTimelineEl.textContent = "";
+    const empty = document.createElement("span");
+    empty.className = "timeline-empty";
+    empty.textContent = text;
+    historyTimelineEl.appendChild(empty);
+  }
+  if (historyEventsEl) {
+    historyEventsEl.textContent = "";
+    const item = document.createElement("li");
+    item.className = "history-event empty";
+    item.textContent = text;
+    historyEventsEl.appendChild(item);
+  }
+}
+
+function renderHistoryLast(last) {
+  if (!last || typeof last !== "object") {
+    setText(historyLastEl, "ещё не завершалась");
+    return;
+  }
+  const chunks = [];
+  if (last.file) chunks.push(baseName(last.file));
+  const stamp = Number(last.ts ?? last.finished_at ?? last.end ?? last.time);
+  if (Number.isFinite(stamp) && stamp > 0) chunks.push(clockFinish(stamp));
+  const partsText = historyPartsText(last.parts);
+  if (partsText) chunks.push(partsText);
+  const duration = Number(last.duration);
+  if (Number.isFinite(duration) && duration > 0) chunks.push(formatDuration(duration));
+  setText(historyLastEl, chunks.length ? "Последняя: " + chunks.join(" · ") : "ещё не завершалась");
+}
+
+function renderTimeline(segments) {
+  if (!historyTimelineEl) return;
+  historyTimelineEl.textContent = "";
+  const bounds = historyBounds(historyRange);
+  let visible = 0;
+  for (const segment of segments) {
+    if (!segment) continue;
+    const state = segment.state && STATE_LABELS[segment.state] ? segment.state : "idle";
+    let start = Number(segment.start);
+    let end = Number(segment.end);
+    if (!Number.isFinite(start)) start = bounds.since;
+    if (!Number.isFinite(end) || end <= start) end = start + 1;
+    const from = Math.max(bounds.since, start);
+    const to = Math.min(bounds.until, end);
+    if (to <= from) continue;
+    const node = document.createElement("span");
+    node.className = "timeline-segment " + state;
+    node.style.flexGrow = String(to - from);
+    node.style.flexBasis = "0";
+    const label = STATE_LABELS[state] || state;
+    const file = segment.file ? baseName(segment.file) : "";
+    const title = label + "\n" + clockFinish(from) + " – " + clockFinish(to) + (file ? "\n" + file : "");
+    node.title = title;
+    historyTimelineEl.appendChild(node);
+    visible += 1;
+  }
+  if (!visible) {
+    const empty = document.createElement("span");
+    empty.className = "timeline-empty";
+    empty.textContent = "Нет данных за период";
+    historyTimelineEl.appendChild(empty);
+  }
+  historyTimelineEl.setAttribute("aria-label", "Лента состояний: участков " + visible);
+}
+
+function renderHistoryEvents(events) {
+  if (!historyEventsEl) return;
+  historyEventsEl.textContent = "";
+  if (!events.length) {
+    const item = document.createElement("li");
+    item.className = "history-event empty";
+    item.textContent = "Событий нет";
+    historyEventsEl.appendChild(item);
+    return;
+  }
+  const rows = events.slice(-HISTORY_EVENT_LIMIT).reverse();
+  for (const event of rows) {
+    if (!event || typeof event !== "object") continue;
+    const item = document.createElement("li");
+    item.className = "history-event";
+    const stamp = Number(event.ts);
+    const time = document.createElement("time");
+    time.textContent = Number.isFinite(stamp) && stamp > 0 ? clockFinish(stamp) : "—";
+    const state = event.state && STATE_LABELS[event.state] ? event.state : "";
+    const label = document.createElement("span");
+    label.className = "history-event-state" + (state ? " " + state : "");
+    label.textContent = state ? STATE_LABELS[state] : "—";
+    const file = document.createElement("span");
+    file.className = "history-event-file";
+    file.textContent = event.file ? baseName(event.file) : "";
+    item.appendChild(time);
+    item.appendChild(label);
+    item.appendChild(file);
+    const partsText = historyPartsText(event.parts);
+    if (partsText) {
+      const parts = document.createElement("span");
+      parts.className = "history-event-parts";
+      parts.textContent = partsText;
+      item.appendChild(parts);
+    }
+    if (event.message) {
+      const message = document.createElement("span");
+      message.className = "history-event-message";
+      message.textContent = String(event.message);
+      item.appendChild(message);
+    }
+    historyEventsEl.appendChild(item);
+  }
+}
+
+function renderHistory(data) {
+  const printer = data && data.printer && typeof data.printer === "object" ? data.printer : {};
+  const fallback = historyView(historyKey);
+  updateHistoryState(printer.state || (fallback ? fallback.state : ""));
+  renderHistoryLast(data ? data.last_completion : null);
+  const segments = data && Array.isArray(data.segments) ? data.segments : [];
+  const events = data && Array.isArray(data.events) ? data.events : [];
+  renderTimeline(segments);
+  renderHistoryEvents(events);
+  setText(historySummaryEl, "Событий: " + events.length + " · участков: " + segments.length);
+}
+
+async function loadHistory() {
+  if (!historyKey) return;
+  const token = historyRequest + 1;
+  historyRequest = token;
+  const bounds = historyBounds(historyRange);
+  if (historySummaryEl) setText(historySummaryEl, "Загрузка…");
+  try {
+    const data = await requestJSON(
+      "/api/history/" +
+        encodeURIComponent(historyKey) +
+        "?since=" +
+        bounds.since +
+        "&until=" +
+        bounds.until +
+        "&limit=" +
+        HISTORY_LIMIT,
+      { timeout: 6000 }
+    );
+    if (token !== historyRequest || !modalHistory || modalHistory.hidden) return;
+    renderHistory(data || {});
+  } catch (error) {
+    if (token !== historyRequest) return;
+    renderHistoryMessage("Не удалось загрузить историю.");
+    setText(historySummaryEl, "Ошибка");
+    toast(errorText(error, "Не удалось загрузить историю."), "error");
+  }
+}
+
+function openHistoryModal(key) {
+  if (!modalHistory || !key) return;
+  const view = historyView(key);
+  historyKey = key;
+  historyRange = "24h";
+  setText(historyTitleEl, view && view.name ? view.name : key);
+  updateHistoryState(view ? view.state : "");
+  setText(historyLastEl, "ещё не завершалась");
+  renderHistoryMessage("Загрузка…");
+  syncHistoryRange();
+  openModal(modalHistory);
+  loadHistory();
+}
+
+function formatPlanNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  if (Number.isInteger(number)) return String(number);
+  return number.toFixed(1).replace(/\.0$/, "").replace(".", ",");
+}
+
+function planPercent(done, target, given) {
+  const provided = given !== null && given !== undefined && given !== "";
+  const percent = provided ? Number(given) : NaN;
+  if (Number.isFinite(percent)) return Math.max(0, Math.min(100, Math.round(percent)));
+  const total = Number(target);
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  const current = Number(done);
+  if (!Number.isFinite(current) || current <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
+
+function renderPlanCard(period) {
+  const data = planData && planData[period] ? planData[period] : null;
+  const partsBar = document.getElementById("plan-" + period + "-parts-bar");
+  const hoursBar = document.getElementById("plan-" + period + "-hours-bar");
+  const badge = document.getElementById("plan-" + period + "-badge");
+  const parts = data ? data.parts_done : 0;
+  const partsTarget = data ? data.parts_target : 0;
+  const hours = data ? data.hours_done : 0;
+  const hoursTarget = data ? data.hours_target : 0;
+  const partsPercent = planPercent(parts, partsTarget, data ? data.parts_percent : null);
+  const hoursPercent = planPercent(hours, hoursTarget, data ? data.hours_percent : null);
+  if (partsBar) partsBar.style.width = partsPercent + "%";
+  if (hoursBar) hoursBar.style.width = hoursPercent + "%";
+  setText(document.getElementById("plan-" + period + "-parts-text"), "деталей: " + formatPlanNumber(parts) + " / " + formatPlanNumber(partsTarget));
+  setText(document.getElementById("plan-" + period + "-hours-text"), "часов: " + formatPlanNumber(hours) + " / " + formatPlanNumber(hoursTarget));
+  if (badge) {
+    setText(badge, partsPercent + " %");
+    badge.title = "детали " + partsPercent + " %, часы " + hoursPercent + " %";
+  }
+  const inputs = planInputs[period] || {};
+  if (planEdited) return;
+  if (inputs.parts) inputs.parts.value = String(Number(partsTarget) || 0);
+  if (inputs.hours) inputs.hours.value = String(Number(hoursTarget) || 0);
+}
+
+function renderPlan() {
+  if (planBadgeEl) {
+    const day = planData && planData.day ? planData.day : null;
+    if (day) setText(planBadgeEl, "день " + formatPlanNumber(day.parts_done) + "/" + formatPlanNumber(day.parts_target));
+    else setText(planBadgeEl, "день —");
+  }
+  for (const period of PLAN_PERIODS) renderPlanCard(period);
+}
+
+async function loadPlan() {
+  try {
+    const data = await requestJSON("/api/plan", { timeout: 6000 });
+    if (!data || typeof data !== "object") return;
+    planData = data;
+    renderPlan();
+  } catch {}
+}
+
+function openPlanModal() {
+  if (!modalPlan) return;
+  planEdited = false;
+  setText(planStatusEl, "");
+  renderPlan();
+  openModal(modalPlan);
+  loadPlan();
+  const first = planInputs.day ? planInputs.day.parts : null;
+  if (first) {
+    window.setTimeout(function () {
+      if (modalPlan && !modalPlan.hidden) first.focus();
+    }, 0);
+  }
+}
+
+async function savePlan() {
+  if (planBusy) return;
+  const bodies = PLAN_PERIODS.map(function (period) {
+    const inputs = planInputs[period] || {};
+    const parts = Number(inputs.parts ? inputs.parts.value : 0);
+    const hours = Number(inputs.hours ? inputs.hours.value : 0);
+    return {
+      period: period,
+      parts_target: Number.isFinite(parts) ? Math.max(0, parts) : 0,
+      hours_target: Number.isFinite(hours) ? Math.max(0, hours) : 0,
+    };
+  });
+  planBusy = true;
+  if (planSaveEl) planSaveEl.disabled = true;
+  setText(planStatusEl, "Сохранение…");
+  const results = await Promise.allSettled(
+    bodies.map(function (body) {
+      return requestJSON("/api/plan", { method: "POST", body: body });
+    })
+  );
+  planBusy = false;
+  if (planSaveEl) planSaveEl.disabled = false;
+  const failed = results.filter(function (result) {
+    return result.status === "rejected";
+  }).length;
+  if (!failed) planEdited = false;
+  if (failed) {
+    setText(planStatusEl, "Ошибка сохранения");
+    toast("Не удалось сохранить план: ошибок " + failed + ".", "error");
+  } else {
+    setText(planStatusEl, "Сохранено");
+    toast("План сохранён.");
+  }
+  await loadPlan();
+}
+
 async function heartbeat() {
   try {
     await requestJSON("/api/heartbeat", { method: "POST", body: {}, timeout: 4000 });
@@ -2418,6 +2765,11 @@ function bindCards() {
       if (action === "rename") {
         closeCardMenus();
         openRenameModal("single", key);
+        return;
+      }
+      if (action === "history") {
+        closeCardMenus();
+        openHistoryModal(key);
         return;
       }
       if (action === "cancel-print") {
@@ -2524,6 +2876,33 @@ function init() {
   journalCountEl = document.getElementById("journal-count");
   journalToggleEl = document.getElementById("journal-toggle");
   journalCloseEl = document.getElementById("journal-close");
+  modalHistory = document.getElementById("modal-history");
+  historyTitleEl = document.getElementById("history-title");
+  historyPillEl = document.getElementById("history-state-pill");
+  historyStateLabelEl = document.getElementById("history-state-label");
+  historyLastEl = document.getElementById("history-last");
+  historyTimelineEl = document.getElementById("history-timeline");
+  historyEventsEl = document.getElementById("history-events");
+  historySummaryEl = document.getElementById("history-summary");
+  historyRangesEl = document.getElementById("history-ranges");
+  modalPlan = document.getElementById("modal-plan");
+  planButtonEl = document.getElementById("plan");
+  planBadgeEl = document.getElementById("plan-badge");
+  planSaveEl = document.getElementById("plan-save");
+  planStatusEl = document.getElementById("plan-status");
+  for (const period of PLAN_PERIODS) {
+    planInputs[period] = {
+      parts: document.getElementById("plan-" + period + "-parts"),
+      hours: document.getElementById("plan-" + period + "-hours"),
+    };
+    for (const input of [planInputs[period].parts, planInputs[period].hours]) {
+      if (input) {
+        input.addEventListener("input", function () {
+          planEdited = true;
+        });
+      }
+    }
+  }
 
   if (searchEl) {
     searchEl.addEventListener("input", function () {
@@ -2687,6 +3066,21 @@ function init() {
     setJournalOpen(false);
   });
 
+  if (planButtonEl) planButtonEl.addEventListener("click", openPlanModal);
+  if (planSaveEl) planSaveEl.addEventListener("click", savePlan);
+  if (historyRangesEl) {
+    historyRangesEl.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target ? target.closest("[data-range]") : null;
+      if (!button) return;
+      const range = button.dataset.range || "24h";
+      if (!HISTORY_RANGES[range] || range === historyRange) return;
+      historyRange = range;
+      syncHistoryRange();
+      loadHistory();
+    });
+  }
+
   const confirmOk = document.getElementById("confirm-ok");
   if (confirmOk) confirmOk.addEventListener("click", function () {
     finishConfirm(true);
@@ -2699,6 +3093,8 @@ function init() {
   renderFilesStrip();
   fetchState();
   loadJournal();
+  loadPlan();
+  window.setInterval(loadPlan, PLAN_POLL_MS);
   heartbeat();
   window.setInterval(heartbeat, HEARTBEAT_MS);
 }

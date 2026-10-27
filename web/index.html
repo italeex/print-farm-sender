@@ -27,6 +27,10 @@
       <i aria-hidden="true"></i>
       <span id="conn-text">Сервер работает</span>
     </div>
+    <button class="btn ghost" id="plan" type="button" title="План выпуска">
+      План
+      <span class="badge" id="plan-badge">день —</span>
+    </button>
     <button class="btn" id="refresh" type="button">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 11A8 8 0 1 0 6 7"/><path d="M4 4v5h5"/></svg>
       Обновить
@@ -295,6 +299,92 @@
   </div>
 </div>
 
+<div class="modal" id="modal-history" role="dialog" aria-modal="true" aria-labelledby="history-title" hidden>
+  <div class="modal-card history">
+    <header class="modal-head">
+      <h2 id="history-title">История</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="history-head">
+        <span class="pill idle" id="history-state-pill"><i></i><span id="history-state-label">—</span></span>
+        <p class="history-last" id="history-last">ещё не завершалась</p>
+      </div>
+      <div class="history-ranges chips" id="history-ranges" role="group" aria-label="Период истории">
+        <button class="chip active" type="button" data-range="24h" aria-pressed="true">24 часа</button>
+        <button class="chip" type="button" data-range="7d" aria-pressed="false">7 дней</button>
+        <button class="chip" type="button" data-range="30d" aria-pressed="false">30 дней</button>
+      </div>
+      <div class="timeline" id="history-timeline" role="img" aria-label="Лента состояний"></div>
+      <div class="legend" aria-label="Обозначения состояний">
+        <span class="legend-item"><i class="printing"></i>Печать</span>
+        <span class="legend-item"><i class="paused"></i>Пауза</span>
+        <span class="legend-item"><i class="idle"></i>Свободен</span>
+        <span class="legend-item"><i class="error"></i>Ошибка</span>
+        <span class="legend-item"><i class="offline"></i>Не в сети</span>
+      </div>
+      <ol class="history-events" id="history-events" aria-label="События принтера"></ol>
+    </div>
+    <footer class="modal-foot">
+      <span id="history-summary">—</span>
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close>Закрыть</button>
+    </footer>
+  </div>
+</div>
+
+<div class="modal" id="modal-plan" role="dialog" aria-modal="true" aria-labelledby="modal-plan-title" hidden>
+  <div class="modal-card plan">
+    <header class="modal-head">
+      <h2 id="modal-plan-title">План выпуска</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="plan-grid">
+        <section class="plan-card">
+          <header class="plan-head"><h3>День</h3><span class="badge" id="plan-day-badge">0 %</span></header>
+          <div class="plan-progress"><i id="plan-day-parts-bar" style="width:0%"></i></div>
+          <p class="plan-line" id="plan-day-parts-text">деталей: 0 / 0</p>
+          <div class="plan-progress"><i id="plan-day-hours-bar" style="width:0%"></i></div>
+          <p class="plan-line" id="plan-day-hours-text">часов: 0 / 0</p>
+          <div class="field-row">
+            <div class="field"><label for="plan-day-parts">Деталей</label><input id="plan-day-parts" type="number" min="0" step="1" value="0"></div>
+            <div class="field"><label for="plan-day-hours">Часов</label><input id="plan-day-hours" type="number" min="0" step="0.5" value="0"></div>
+          </div>
+        </section>
+        <section class="plan-card">
+          <header class="plan-head"><h3>Неделя</h3><span class="badge" id="plan-week-badge">0 %</span></header>
+          <div class="plan-progress"><i id="plan-week-parts-bar" style="width:0%"></i></div>
+          <p class="plan-line" id="plan-week-parts-text">деталей: 0 / 0</p>
+          <div class="plan-progress"><i id="plan-week-hours-bar" style="width:0%"></i></div>
+          <p class="plan-line" id="plan-week-hours-text">часов: 0 / 0</p>
+          <div class="field-row">
+            <div class="field"><label for="plan-week-parts">Деталей</label><input id="plan-week-parts" type="number" min="0" step="1" value="0"></div>
+            <div class="field"><label for="plan-week-hours">Часов</label><input id="plan-week-hours" type="number" min="0" step="0.5" value="0"></div>
+          </div>
+        </section>
+        <section class="plan-card">
+          <header class="plan-head"><h3>Месяц</h3><span class="badge" id="plan-month-badge">0 %</span></header>
+          <div class="plan-progress"><i id="plan-month-parts-bar" style="width:0%"></i></div>
+          <p class="plan-line" id="plan-month-parts-text">деталей: 0 / 0</p>
+          <div class="plan-progress"><i id="plan-month-hours-bar" style="width:0%"></i></div>
+          <p class="plan-line" id="plan-month-hours-text">часов: 0 / 0</p>
+          <div class="field-row">
+            <div class="field"><label for="plan-month-parts">Деталей</label><input id="plan-month-parts" type="number" min="0" step="1" value="0"></div>
+            <div class="field"><label for="plan-month-hours">Часов</label><input id="plan-month-hours" type="number" min="0" step="0.5" value="0"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span id="plan-status" role="status" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close>Закрыть</button>
+      <button class="btn primary" id="plan-save" type="button">Сохранить</button>
+    </footer>
+  </div>
+</div>
+
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <template id="card-template">
@@ -354,6 +444,7 @@
         <button class="mini" type="button" data-action="menu" data-field="menu" aria-label="Действия с принтером" title="Действия" aria-expanded="false">•••</button>
       </div>
       <div class="card-menu" data-field="card-menu" hidden>
+        <button type="button" data-action="history">История</button>
         <button type="button" data-action="rename">Переименовать</button>
         <a data-action="ui" data-field="mainsail-menu" target="_blank" rel="noopener noreferrer">Открыть интерфейс</a>
         <button type="button" data-action="camera">Открыть камеру</button>
