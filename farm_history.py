@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 import time
@@ -5,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from farm_core import APP_DIR
+from farm_plan import part_key
 
 HISTORY_PATH = APP_DIR / "farm_history.db"
 PERIODS = ("day", "week", "month")
@@ -22,13 +24,22 @@ CREATE TABLE IF NOT EXISTS events (
     file TEXT,
     parts INTEGER,
     duration REAL,
-    message TEXT
+    message TEXT,
+    parts_json TEXT
 );
 CREATE INDEX IF NOT EXISTS events_printer_ts ON events (printer_key, ts);
 CREATE TABLE IF NOT EXISTS goals (
     period TEXT PRIMARY KEY,
     parts_target INTEGER NOT NULL DEFAULT 0,
     hours_target REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS plan_items (
+    date TEXT NOT NULL,
+    part_key TEXT NOT NULL,
+    code TEXT,
+    name TEXT,
+    target INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (date, part_key)
 );
 """
 
@@ -77,6 +88,30 @@ def _part_count(parts) -> int:
     return total
 
 
+def _parts_payload(parts) -> list[dict]:
+    result = []
+    for part in parts or []:
+        if isinstance(part, dict):
+            name = part.get("name")
+            count = part.get("count")
+        else:
+            name = getattr(part, "name", "")
+            count = getattr(part, "count", 0)
+        try:
+            amount = int(count or 0)
+        except (TypeError, ValueError):
+            continue
+        result.append({"name": str(name or ""), "count": amount})
+    return result
+
+
+def _day_of(value: float) -> str:
+    try:
+        return datetime.fromtimestamp(value).date().isoformat()
+    except (OSError, OverflowError, ValueError):
+        return (datetime(1970, 1, 1) + timedelta(seconds=value)).date().isoformat()
+
+
 def _period_bounds(period: str, now: float) -> tuple[float, float]:
     moment = datetime.fromtimestamp(now)
     if period == "week":
@@ -116,6 +151,7 @@ class HistoryStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
             self._prune(self._clock())
             self._conn.commit()
@@ -131,10 +167,12 @@ class HistoryStore:
         kind = _event_type(previous, state, previous is None)
         file_value = filename
         parts = None
+        parts_json = None
         message = None
         if kind == "complete":
             file_value = str(previous.file or "") or filename
             parts = _part_count(previous.parts)
+            parts_json = json.dumps(_parts_payload(previous.parts), ensure_ascii=False)
         if kind == "cancelled":
             file_value = str(previous.file or "") or filename
         if kind == "error":
@@ -169,9 +207,9 @@ class HistoryStore:
                             start = float(row["ts"])
                     self._printing_since[key] = moment if start is None else start
             cursor = self._conn.execute(
-                "INSERT INTO events (printer_key, ts, event, state, file, parts, duration, message) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (key, moment, kind, state, file_value, parts, duration, message),
+                "INSERT INTO events (printer_key, ts, event, state, file, parts, duration, message, parts_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (key, moment, kind, state, file_value, parts, duration, message, parts_json),
             )
             self._conn.commit()
             if moment - self._last_prune >= PRUNE_INTERVAL:
@@ -260,18 +298,25 @@ class HistoryStore:
             result = {}
             for period in PERIODS:
                 start, end = _period_bounds(period, moment)
-                parts_done = self._conn.execute(
-                    "SELECT COALESCE(SUM(parts), 0) FROM events "
-                    "WHERE event = 'complete' AND ts >= ? AND ts < ?",
-                    (start, end),
-                ).fetchone()[0] or 0
+                items = self._period_items(start, end, self._actuals(start, end))
+                if items:
+                    parts_target = sum(item["target"] for item in items)
+                    parts_done = sum(item["actual"] for item in items)
+                else:
+                    parts_target = 0
+                    parts_done = self._conn.execute(
+                        "SELECT COALESCE(SUM(parts), 0) FROM events "
+                        "WHERE event = 'complete' AND ts >= ? AND ts < ?",
+                        (start, end),
+                    ).fetchone()[0] or 0
                 hours = 0.0
                 for key in printers:
                     for segment in self.segments(key, start, end):
                         if segment["state"] == "printing":
                             hours += float(segment["end"]) - float(segment["start"])
                 goal = goals.get(period)
-                parts_target = int(goal["parts_target"]) if goal is not None else 0
+                if goal is not None and not items:
+                    parts_target = int(goal["parts_target"])
                 hours_target = float(goal["hours_target"]) if goal is not None else 0.0
                 parts_done = int(parts_done)
                 result[period] = {
@@ -284,8 +329,36 @@ class HistoryStore:
                     "hours_done": round(hours / 3600.0, 3),
                     "parts_percent": round(parts_done / parts_target * 100.0, 1) if parts_target > 0 else 0.0,
                     "hours_percent": round(hours / 3600.0 / hours_target * 100.0, 1) if hours_target > 0 else 0.0,
+                    "items": items,
                 }
             return result
+
+    def import_plan(self, items) -> dict:
+        rows = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            day = str(item.get("date") or "").strip()
+            key = str(item.get("key") or item.get("part_key") or "").strip()
+            try:
+                target = int(item.get("target") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not day or not key or target <= 0:
+                continue
+            rows.append((day, key, str(item.get("code") or ""), str(item.get("name") or ""), target))
+        days = sorted({row[0] for row in rows})
+        with self._lock:
+            if days:
+                marks = ", ".join("?" for _ in days)
+                self._conn.execute(f"DELETE FROM plan_items WHERE date IN ({marks})", days)
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO plan_items (date, part_key, code, name, target) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.commit()
+        return {"imported": len(rows), "days": len(days)}
 
     def set_goal(self, period, parts_target, hours_target) -> dict:
         if period not in PERIODS:
@@ -330,6 +403,81 @@ class HistoryStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def _period_items(self, start, end, actuals) -> list[dict]:
+        first = _day_of(start)
+        last = _day_of(end - 1.0)
+        entries: dict[str, dict] = {}
+        for row in self._conn.execute(
+            "SELECT date, part_key, code, name, target FROM plan_items "
+            "WHERE date >= ? AND date <= ? ORDER BY date, part_key",
+            (first, last),
+        ):
+            key = str(row["part_key"])
+            entry = entries.get(key)
+            if entry is None:
+                entry = entries[key] = {
+                    "key": key,
+                    "code": str(row["code"] or ""),
+                    "name": str(row["name"] or ""),
+                    "target": 0,
+                    "actual": 0,
+                    "days": {},
+                }
+            target = int(row["target"] or 0)
+            day = str(row["date"])
+            bucket = entry["days"].setdefault(day, {"date": day, "target": 0, "actual": 0})
+            bucket["target"] += target
+            entry["target"] += target
+        for (day, key), count in actuals.items():
+            entry = entries.get(key)
+            if entry is None:
+                continue
+            entry["actual"] += count
+            entry["days"].setdefault(day, {"date": day, "target": 0, "actual": 0})["actual"] += count
+        items = []
+        for key in sorted(entries):
+            entry = entries[key]
+            entry["percent"] = round(entry["actual"] / entry["target"] * 100.0, 1) if entry["target"] > 0 else 0.0
+            entry["days"] = [entry["days"][day] for day in sorted(entry["days"])]
+            items.append(entry)
+        return items
+
+    def _actuals(self, start, end) -> dict[tuple[str, str], int]:
+        totals: dict[tuple[str, str], int] = {}
+        rows = self._conn.execute(
+            "SELECT ts, parts_json FROM events WHERE event = 'complete' "
+            "AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
+            (start, end),
+        )
+        for row in rows:
+            try:
+                day = _day_of(float(row["ts"]))
+                parts = json.loads(row["parts_json"] or "[]")
+            except (OverflowError, ValueError):
+                continue
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                key = part_key(part.get("name") or "")
+                if not key:
+                    continue
+                try:
+                    count = int(part.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if count <= 0:
+                    continue
+                marker = (day, key)
+                totals[marker] = totals.get(marker, 0) + count
+        return totals
+
+    def _migrate(self) -> None:
+        columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(events)")}
+        if "parts_json" not in columns:
+            self._conn.execute("ALTER TABLE events ADD COLUMN parts_json TEXT")
 
     def _last_event(self, key, until=None) -> sqlite3.Row | None:
         sql = f"SELECT {EVENT_COLUMNS} FROM events WHERE printer_key = ?"

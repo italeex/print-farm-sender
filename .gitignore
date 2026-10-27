@@ -6,6 +6,8 @@ farm.log
 farm.log.*
 farm_history.db*
 .superpowers/
+*.xlsx
+~$*
 
 .projectmem/events.jsonl
 .projectmem/watch.pid

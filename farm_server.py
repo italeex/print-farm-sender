@@ -35,6 +35,7 @@ from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
+from farm_plan import PLAN_SUFFIXES, parse_plan_file
 from farm_thumbs import ThumbCache, thumbnail_from_file
 
 LOGGER = logging.getLogger(__name__)
@@ -73,6 +74,11 @@ options = {
     "title": "Выберите gcode-файлы",
     "filetypes": [("G-code", "*.gcode")],
 }
+if len(sys.argv) > 2 and sys.argv[2] == "plan":
+    options = {
+        "title": "Выберите файл плана",
+        "filetypes": [("План", "*.xlsx *.json"), ("Excel", "*.xlsx"), ("JSON", "*.json")],
+    }
 if len(sys.argv) > 1 and sys.argv[1]:
     options["initialdir"] = sys.argv[1]
 paths = filedialog.askopenfilenames(parent=root, **options)
@@ -113,7 +119,7 @@ class BrowseError(Exception):
     pass
 
 
-def existing_gcode_paths(items) -> list[str]:
+def _existing_paths(items, suffixes) -> list[str]:
     result = []
     if not isinstance(items, (list, tuple)):
         return result
@@ -122,7 +128,7 @@ def existing_gcode_paths(items) -> list[str]:
             path = Path(str(item))
         except (TypeError, ValueError):
             continue
-        if path.suffix.lower() != GCODE_SUFFIX:
+        if path.suffix.lower() not in suffixes:
             continue
         try:
             if not path.is_file():
@@ -133,10 +139,18 @@ def existing_gcode_paths(items) -> list[str]:
     return result
 
 
-def _native_browse_files(initial_dir: str = "") -> list[str]:
+def existing_gcode_paths(items) -> list[str]:
+    return _existing_paths(items, (GCODE_SUFFIX,))
+
+
+def existing_plan_paths(items) -> list[str]:
+    return _existing_paths(items, PLAN_SUFFIXES)
+
+
+def _native_browse_files(initial_dir: str = "", kind: str = "gcode") -> list[str]:
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", DIALOG_SCRIPT, str(initial_dir or "")],
+            [sys.executable, "-c", DIALOG_SCRIPT, str(initial_dir or ""), str(kind)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -155,6 +169,10 @@ def _native_browse_files(initial_dir: str = "") -> list[str]:
     if not isinstance(raw_paths, list):
         raise BrowseError("Диалог выбора файлов вернул некорректный ответ")
     return [str(item) for item in raw_paths]
+
+
+def _native_browse_plan_files(initial_dir: str = "") -> list[str]:
+    return _native_browse_files(initial_dir, "plan")
 
 
 class Journal:
@@ -194,6 +212,7 @@ class FarmApp:
         start_monitor: bool = False,
         idle_timeout: float = IDLE_TIMEOUT,
         browse_files=None,
+        browse_plan_files=None,
         scan_func=None,
         ui_detect_func=None,
         history=None,
@@ -202,6 +221,9 @@ class FarmApp:
         self.idle_timeout = float(idle_timeout)
         self.started_at = time.time()
         self.browse_files = browse_files if browse_files is not None else _native_browse_files
+        self.browse_plan_files = (
+            browse_plan_files if browse_plan_files is not None else _native_browse_plan_files
+        )
         self.scan_func = scan_func if scan_func is not None else scan_subnet
         self.ui_detect_func = ui_detect_func if ui_detect_func is not None else detect_ui
         self.journal = Journal()
@@ -375,6 +397,9 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/printers":
             self._api_printer_create()
+            return
+        if path == "/api/plan/import":
+            self._api_plan_import()
             return
         if path == "/api/plan":
             self._api_plan()
@@ -550,6 +575,37 @@ class FarmHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _api_plan_import(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_path = payload.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            self._send_error(400, "Не указан путь к файлу плана")
+            return
+        target = Path(raw_path.strip())
+        if not target.is_file():
+            self._send_error(400, f"Файл не найден: {target}")
+            return
+        try:
+            parsed = parse_plan_file(target)
+        except (OSError, ValueError) as exc:
+            self._send_error(400, str(exc) or "Не удалось прочитать файл плана")
+            return
+        result = self.app.history.import_plan(parsed["items"])
+        if not result["imported"]:
+            self._send_error(400, "В файле плана нет данных")
+            return
+        self.app.journal.add(f"План импортирован: деталей {result['imported']}, дней {result['days']}")
+        self._send_json(
+            {
+                "imported": result["imported"],
+                "days": result["days"],
+                "week_start": parsed["week_start"],
+                "items": parsed["items"],
+            }
+        )
+
     def _api_fs_browse(self) -> None:
         payload = self._read_json()
         if payload is None:
@@ -558,9 +614,20 @@ class FarmHandler(BaseHTTPRequestHandler):
         if not isinstance(initial_dir, str):
             self._send_error(400, "Поле initial_dir должно быть строкой")
             return
-        browse = getattr(self.app, "browse_files", None)
+        kind = payload.get("kind")
+        if kind in (None, ""):
+            kind = "gcode"
+        if not isinstance(kind, str) or kind not in ("gcode", "plan"):
+            self._send_error(400, "Поле kind должно быть gcode или plan")
+            return
+        if kind == "plan":
+            browse = getattr(self.app, "browse_plan_files", None)
+            fallback = _native_browse_plan_files
+        else:
+            browse = getattr(self.app, "browse_files", None)
+            fallback = _native_browse_files
         if not callable(browse):
-            browse = _native_browse_files
+            browse = fallback
         if not BROWSE_LOCK.acquire(blocking=False):
             self._send_error(409, "Диалог уже открыт")
             return
@@ -574,7 +641,7 @@ class FarmHandler(BaseHTTPRequestHandler):
             BROWSE_LOCK.release()
         if not isinstance(raw, (list, tuple)):
             raw = []
-        paths = existing_gcode_paths(raw)
+        paths = existing_plan_paths(raw) if kind == "plan" else existing_gcode_paths(raw)
         self._send_json(
             {
                 "paths": paths,

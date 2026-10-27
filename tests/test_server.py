@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
@@ -17,6 +18,7 @@ from farm_monitor import PrinterView, summarize
 from farm_history import HistoryStore
 from farm_server import APP_VERSION, FarmApp, Journal, create_server, find_running_instance
 from tests.fake_moonraker import FakeMoonraker, gcode_with_thumb
+from tests.test_plan import write_plan_xlsx
 
 
 class StubApp:
@@ -1001,6 +1003,71 @@ class ApiTests(unittest.TestCase):
             timeout=3,
         )
         self.assertEqual(not_json.status_code, 415)
+
+
+    def test_plan_import_validates_body(self):
+        empty = requests.post(self.url("/api/plan/import"), json={}, timeout=3)
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("путь", empty.json()["error"])
+        not_string = requests.post(self.url("/api/plan/import"), json={"path": 5}, timeout=3)
+        self.assertEqual(not_string.status_code, 400)
+        missing = requests.post(
+            self.url("/api/plan/import"),
+            json={"path": str(Path(self.tmp.name) / "нет.xlsx")},
+            timeout=3,
+        )
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("не найден", missing.json()["error"])
+        other = Path(self.tmp.name) / "plan.csv"
+        other.write_text("дата;деталь", encoding="utf-8")
+        bad = requests.post(self.url("/api/plan/import"), json={"path": str(other)}, timeout=3)
+        self.assertEqual(bad.status_code, 400)
+
+    def test_plan_import_replaces_week(self):
+        today = datetime.fromtimestamp(time.time()).date().isoformat()
+        path = Path(self.tmp.name) / "План график.xlsx"
+        write_plan_xlsx(path, [today], [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (12,))])
+        response = requests.post(self.url("/api/plan/import"), json={"path": str(path)}, timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["imported"], 1)
+        self.assertEqual(payload["days"], 1)
+        self.assertEqual(payload["week_start"], today)
+        self.assertEqual(payload["items"][0]["key"], "ГР3.01.42000.01")
+        plan = requests.get(self.url("/api/plan"), timeout=3).json()
+        self.assertEqual(plan["day"]["parts_target"], 12)
+        self.assertEqual(plan["day"]["items"][0]["target"], 12)
+        self.assertEqual(plan["day"]["items"][0]["code"], "МВСЛ.ГР3.01.42000.01")
+        self.assertEqual(plan["week"]["parts_target"], 12)
+        write_plan_xlsx(path, [today], [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (5,))])
+        again = requests.post(self.url("/api/plan/import"), json={"path": str(path)}, timeout=5)
+        self.assertEqual(again.status_code, 200)
+        plan = requests.get(self.url("/api/plan"), timeout=3).json()
+        self.assertEqual(plan["day"]["parts_target"], 5)
+
+    def test_fs_browse_plan_kind(self):
+        plan = Path(self.tmp.name) / "plan.xlsx"
+        plan.write_bytes(b"PK")
+        calls = []
+
+        def plan_stub(initial_dir):
+            calls.append(initial_dir)
+            return [str(plan), str(self.gcode), str(Path(self.tmp.name) / "notes.txt")]
+
+        self.app.browse_plan_files = plan_stub
+        response = requests.post(
+            self.url("/api/fs/browse"),
+            json={"initial_dir": self.tmp.name, "kind": "plan"},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["paths"], [str(plan.resolve())])
+        self.assertEqual(response.json()["rejected"], 2)
+        self.assertEqual(calls, [self.tmp.name])
+        self.assertEqual(self.browse_calls, [])
+        bad = requests.post(self.url("/api/fs/browse"), json={"kind": "video"}, timeout=3)
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn("kind", bad.json()["error"])
 
 
 if __name__ == "__main__":

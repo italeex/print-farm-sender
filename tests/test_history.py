@@ -1,6 +1,9 @@
+import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -262,6 +265,138 @@ class HistoryStoreTests(unittest.TestCase):
         reopened = HistoryStore(self.path, clock=self.clock)
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.events(KEY), [])
+
+    def test_complete_stores_parts_json(self):
+        self.print_cycle()
+        row = self.history._conn.execute(
+            "SELECT parts_json FROM events WHERE event = 'complete'"
+        ).fetchone()
+        self.assertEqual(
+            json.loads(row["parts_json"]),
+            [{"name": "Корпус", "count": 30}, {"name": "Крышка", "count": 5}],
+        )
+        self.assertIsNone(
+            self.history._conn.execute(
+                "SELECT parts_json FROM events WHERE event = 'state' ORDER BY id LIMIT 1"
+            ).fetchone()["parts_json"]
+        )
+
+    def test_migration_adds_parts_json(self):
+        legacy = self.path.parent / "legacy.db"
+        connection = sqlite3.connect(str(legacy))
+        connection.executescript(
+            "CREATE TABLE events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, printer_key TEXT NOT NULL, ts REAL NOT NULL, "
+            "event TEXT NOT NULL, state TEXT, file TEXT, parts INTEGER, duration REAL, message TEXT);"
+        )
+        connection.commit()
+        connection.close()
+        store = HistoryStore(legacy, clock=self.clock)
+        self.addCleanup(store.close)
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(events)")}
+        self.assertIn("parts_json", columns)
+
+    def today(self, moment=BASE):
+        return datetime.fromtimestamp(moment).date().isoformat()
+
+    def test_import_plan_replaces_dates(self):
+        day = self.today()
+        other = (datetime.fromtimestamp(BASE).date() + timedelta(days=1)).isoformat()
+        self.assertEqual(
+            self.history.import_plan(
+                [
+                    {"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10},
+                    {"date": other, "key": "ГР3.02.10000.01", "code": "МВСЛ.ГР3.02.10000.01", "name": "Корпус", "target": 4},
+                ]
+            ),
+            {"imported": 2, "days": 2},
+        )
+        self.assertEqual(
+            self.history.import_plan(
+                [{"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 3}]
+            ),
+            {"imported": 1, "days": 1},
+        )
+        rows = self.history._conn.execute(
+            "SELECT date, part_key, target FROM plan_items ORDER BY date, part_key"
+        ).fetchall()
+        self.assertEqual(
+            [(row["date"], row["part_key"], row["target"]) for row in rows],
+            [(day, "ГР3.01.42000.01", 3), (other, "ГР3.02.10000.01", 4)],
+        )
+
+    def test_plan_items_actuals_from_complete(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10}]
+        )
+        printing = make_view(
+            "printing",
+            "Крышка.gcode",
+            [
+                {"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 4},
+                {"name": "МВСЛ.ГР3.02.10000.01 Корпус", "count": 2},
+            ],
+        )
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "Крышка.gcode"), printing, BASE + 60)
+        plan = self.history.plan(now=BASE + 60)["day"]
+        self.assertEqual(plan["parts_target"], 10)
+        self.assertEqual(plan["parts_done"], 4)
+        self.assertEqual(plan["parts_percent"], 40.0)
+        self.assertEqual(len(plan["items"]), 1)
+        item = plan["items"][0]
+        self.assertEqual(item["key"], "ГР3.01.42000.01")
+        self.assertEqual(item["code"], "МВСЛ.ГР3.01.42000.01")
+        self.assertEqual(item["name"], "Крышка")
+        self.assertEqual(item["target"], 10)
+        self.assertEqual(item["actual"], 4)
+        self.assertEqual(item["percent"], 40.0)
+        self.assertEqual(item["days"], [{"date": day, "target": 10, "actual": 4}])
+
+    def test_plan_items_aggregate_week_and_month(self):
+        moment = datetime.fromtimestamp(BASE)
+        monday = moment.date() - timedelta(days=moment.weekday())
+        first = monday.isoformat()
+        second = (monday + timedelta(days=1)).isoformat()
+        self.history.import_plan(
+            [
+                {"date": first, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 2},
+                {"date": second, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 3},
+            ]
+        )
+        week = self.history.plan(now=BASE)["week"]
+        self.assertEqual(len(week["items"]), 1)
+        self.assertEqual(week["items"][0]["target"], 5)
+        self.assertEqual(
+            [(day["date"], day["target"]) for day in week["items"][0]["days"]],
+            [(first, 2), (second, 3)],
+        )
+        self.assertEqual(week["parts_target"], 5)
+        self.assertEqual(self.history.plan(now=BASE)["month"]["items"][0]["target"], 5)
+        day = self.history.plan(now=BASE)["day"]
+        expected = {first: 2, second: 3}.get(moment.date().isoformat(), 0)
+        self.assertEqual(day["parts_target"], expected)
+
+    def test_plan_keeps_goal_for_periods_without_items(self):
+        self.history.set_goal("day", 70, 2.0)
+        self.history.import_plan(
+            [
+                {
+                    "date": self.today(),
+                    "key": "ГР3.01.42000.01",
+                    "code": "МВСЛ.ГР3.01.42000.01",
+                    "name": "Крышка",
+                    "target": 9,
+                }
+            ]
+        )
+        current = self.history.plan(now=BASE)["day"]
+        self.assertEqual(current["parts_target"], 9)
+        self.assertEqual(current["hours_target"], 2.0)
+        later = self.history.plan(now=BASE + 40 * 86400)["day"]
+        self.assertEqual(later["items"], [])
+        self.assertEqual(later["parts_target"], 70)
 
 
 if __name__ == "__main__":
