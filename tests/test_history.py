@@ -349,6 +349,16 @@ class HistoryStoreTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([(row["date"], row["target"]) for row in rows], [(days[0], 7)])
 
+    def test_import_empty_keeps_rows(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 5}]
+        )
+        result = self.history.import_plan([], start=day, end=day)
+        self.assertEqual(result, {"imported": 0, "days": 0})
+        rows = self.history._conn.execute("SELECT date, target FROM plan_items").fetchall()
+        self.assertEqual([(row["date"], row["target"]) for row in rows], [(day, 5)])
+
     def test_import_plan_keeps_rows_outside_range(self):
         monday = datetime.fromtimestamp(BASE).date() - timedelta(
             days=datetime.fromtimestamp(BASE).weekday()

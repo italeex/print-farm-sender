@@ -367,6 +367,8 @@ class HistoryStore:
             if not day or not key or target <= 0:
                 continue
             rows.append((day, key, str(item.get("code") or ""), str(item.get("name") or ""), target))
+        if not rows:
+            return {"imported": 0, "days": 0}
         days = sorted({row[0] for row in rows})
         first = _iso_day(start) or (days[0] if days else "")
         last = _iso_day(end) or (days[-1] if days else "")
