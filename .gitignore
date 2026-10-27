@@ -10,3 +10,15 @@ farm.log.*
 .projectmem/watch.pid
 .projectmem/watch.log
 .projectmem/structure.json
+
+# analysis artifacts
+*.gcode
+downloaded_number_parts/
+scan_*.py
+make_summary.py
+make_aggregate.py
+number_parts_*.json
+number_parts_*.md
+scan_result.json
+scan_gcode.py
+

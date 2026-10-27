@@ -26,14 +26,19 @@ def gcode_with_thumb(payload):
     return body.encode("utf-8")
 
 
+def gcode_with_parts(names):
+    return "".join(f"EXCLUDE_OBJECT_DEFINE NAME={name} CENTER=125.0,105.0\n" for name in names).encode("utf-8")
+
+
 class FakeMoonraker:
-    def __init__(self, *, info=None, objects=UNSET, thumb=None, thumb_status=206, log_tail="", failures=0):
+    def __init__(self, *, info=None, objects=UNSET, thumb=None, thumb_status=206, log_tail="", failures=0, parts=None):
         self.info = info or {"state": "ready", "state_message": "Printer is ready"}
         self.objects = DEFAULT_STATUS if objects is UNSET else objects
         self.thumb = thumb
         self.thumb_status = thumb_status
         self.log_tail = log_tail
         self.failures = failures
+        self.parts = parts or []
         self.requests = []
         self.port = 0
         self._served_failures = 0
@@ -88,6 +93,8 @@ class FakeMoonraker:
                         self.send_error(fake.thumb_status)
                         return
                     body = gcode_with_thumb(fake.thumb) if fake.thumb else b"G1 X0\n"
+                    if fake.parts:
+                        body += gcode_with_parts(fake.parts)
                     self._send_bytes(body, "application/octet-stream", fake.thumb_status)
                     return
                 if path == "/server/files/logs/klippy.log":
