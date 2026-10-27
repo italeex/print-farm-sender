@@ -187,7 +187,15 @@ let planEmptyEl = null;
 let planImportEl = null;
 const planInputs = {};
 const planDateEls = {};
-
+let modalPrinting = null;
+let printingButtonEl = null;
+let printingCountEl = null;
+let printingSummaryEl = null;
+let printingPartsSection = null;
+let printingPartsBodyEl = null;
+let printingPrintersSection = null;
+let printingPrintersBodyEl = null;
+let printingEmptyEl = null;
 function pick(root, selectors) {
   for (const selector of selectors) {
     const found = root.querySelector(selector);
@@ -541,6 +549,7 @@ function noteJobExit() {
 
 function render() {
   renderSummary();
+  renderPrinting();
   renderCards();
   renderJob();
   applyFilters();
@@ -2799,6 +2808,133 @@ function openPlanModal() {
   }
 }
 
+function activePrinting() {
+  return state.printers.filter(function (view) {
+    return view && (view.state === "printing" || view.state === "paused");
+  });
+}
+
+function viewParts(view) {
+  const parts = Array.isArray(view.parts) ? view.parts : [];
+  return parts.filter(function (part) {
+    return part && part.name;
+  });
+}
+
+function partsSummary(parts) {
+  return parts
+    .map(function (part) {
+      return String(part.name) + " × " + (Number(part.count) || 0);
+    })
+    .join(", ");
+}
+
+function partsCount(parts) {
+  return parts.reduce(function (sum, part) {
+    return sum + (Number(part.count) || 0);
+  }, 0);
+}
+
+function syncPrintingCount(count) {
+  setText(printingCountEl, count);
+  if (printingButtonEl) {
+    const label = "Сейчас печатается: " + count;
+    printingButtonEl.title = label;
+    printingButtonEl.setAttribute("aria-label", label);
+  }
+}
+
+function printingGroups(active) {
+  const groups = new Map();
+  for (const view of active) {
+    const printerName = view.name || view.key || "";
+    for (const part of viewParts(view)) {
+      const name = String(part.name);
+      if (!groups.has(name)) groups.set(name, { name: name, count: 0, printers: [] });
+      const group = groups.get(name);
+      group.count += Number(part.count) || 0;
+      if (printerName && group.printers.indexOf(printerName) === -1) group.printers.push(printerName);
+    }
+  }
+  return Array.from(groups.values()).sort(function (a, b) {
+    if (b.count !== a.count) return b.count - a.count;
+    return a.name.localeCompare(b.name, "ru");
+  });
+}
+
+function printingCell(row, text, className) {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  cell.textContent = text;
+  row.appendChild(cell);
+  return cell;
+}
+
+function renderPrintingModal(active) {
+  if (!printingSummaryEl || !printingPartsBodyEl || !printingPrintersBodyEl) return;
+  const empty = active.length === 0;
+  let total = 0;
+  for (const view of active) total += partsCount(viewParts(view));
+  const summary = empty
+    ? ""
+    : "В работе " + active.length + " " + plural(active.length, "принтер", "принтера", "принтеров") +
+      " · " + total + " " + plural(total, "деталь", "детали", "деталей");
+  setText(printingSummaryEl, summary);
+  printingSummaryEl.hidden = empty;
+  if (printingEmptyEl) printingEmptyEl.hidden = !empty;
+
+  const groups = printingGroups(active);
+  printingPartsBodyEl.textContent = "";
+  for (const group of groups) {
+    const row = document.createElement("tr");
+    printingCell(row, group.name, "printing-name");
+    printingCell(row, String(group.count), "printing-num");
+    const printers = printingCell(row, group.printers.join(", "), "printing-printers");
+    printers.title = printers.textContent;
+    printingPartsBodyEl.appendChild(row);
+  }
+  if (printingPartsSection) printingPartsSection.hidden = empty || groups.length === 0;
+
+  printingPrintersBodyEl.textContent = "";
+  for (const view of active) {
+    const parts = viewParts(view);
+    const row = document.createElement("tr");
+    printingCell(row, view.name || view.key || "—", "printing-name");
+    const status = view.state === "paused" ? "paused" : "printing";
+    const stateCell = document.createElement("td");
+    const pill = document.createElement("span");
+    pill.className = "pill " + status;
+    const dot = document.createElement("i");
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = STATE_LABELS[status] || status;
+    pill.appendChild(dot);
+    pill.appendChild(label);
+    stateCell.appendChild(pill);
+    row.appendChild(stateCell);
+    const file = printingCell(row, view.file || "—", "printing-file");
+    file.title = file.textContent;
+    const position = printingCell(row, parts.length ? partsSummary(parts) : "—", "printing-parts");
+    position.title = position.textContent;
+    printingCell(row, parts.length ? String(partsCount(parts)) : "—", "printing-num");
+    printingPrintersBodyEl.appendChild(row);
+  }
+  if (printingPrintersSection) printingPrintersSection.hidden = empty;
+}
+
+function renderPrinting() {
+  const active = activePrinting();
+  syncPrintingCount(active.length);
+  if (!modalPrinting || modalPrinting.hidden) return;
+  renderPrintingModal(active);
+}
+
+function openPrintingModal() {
+  if (!modalPrinting) return;
+  openModal(modalPrinting);
+  renderPrintingModal(activePrinting());
+}
+
 function planFilePaths(data) {
   const lists = [];
   if (Array.isArray(data)) lists.push(data);
@@ -3128,6 +3264,15 @@ function init() {
   planTableBodyEl = document.getElementById("plan-table-body");
   planEmptyEl = document.getElementById("plan-empty");
   planImportEl = document.getElementById("plan-import");
+  modalPrinting = document.getElementById("modal-printing");
+  printingButtonEl = document.getElementById("printing");
+  printingCountEl = document.getElementById("printing-count");
+  printingSummaryEl = document.getElementById("printing-summary");
+  printingPartsSection = document.getElementById("printing-parts-section");
+  printingPartsBodyEl = document.getElementById("printing-parts-body");
+  printingPrintersSection = document.getElementById("printing-printers-section");
+  printingPrintersBodyEl = document.getElementById("printing-printers-body");
+  printingEmptyEl = document.getElementById("printing-empty");
   for (const period of PLAN_PERIODS) {
     planDateEls[period] = document.getElementById("plan-" + period + "-dates");
     planInputs[period] = {
@@ -3304,6 +3449,7 @@ function init() {
   });
 
   if (planButtonEl) planButtonEl.addEventListener("click", openPlanModal);
+  if (printingButtonEl) printingButtonEl.addEventListener("click", openPrintingModal);
   if (planSaveEl) planSaveEl.addEventListener("click", savePlan);
   if (planImportEl) planImportEl.addEventListener("click", importPlan);
   if (planTabsEl) {

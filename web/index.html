@@ -31,6 +31,10 @@
       План
       <span class="badge" id="plan-badge">неделя —</span>
     </button>
+    <button class="btn ghost" id="printing" type="button" aria-haspopup="dialog" title="Сейчас печатается">
+      Печатается
+      <span class="badge" id="printing-count">0</span>
+    </button>
     <button class="btn" id="refresh" type="button">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 11A8 8 0 1 0 6 7"/><path d="M4 4v5h5"/></svg>
       Обновить
@@ -327,6 +331,45 @@
     </div>
     <footer class="modal-foot">
       <span id="history-summary">—</span>
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close>Закрыть</button>
+    </footer>
+  </div>
+</div>
+
+<div class="modal" id="modal-printing" role="dialog" aria-modal="true" aria-labelledby="modal-printing-title" hidden>
+  <div class="modal-card printing">
+    <header class="modal-head">
+      <h2 id="modal-printing-title">Сейчас печатается</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="printing-summary" id="printing-summary">—</p>
+      <section class="printing-section" id="printing-parts-section">
+        <h3>Детали</h3>
+        <div class="printing-table-wrap">
+          <table class="printing-table" id="printing-parts">
+            <thead>
+              <tr><th scope="col">Позиция</th><th scope="col">Количество</th><th scope="col">Принтеры</th></tr>
+            </thead>
+            <tbody id="printing-parts-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="printing-section" id="printing-printers-section">
+        <h3>Принтеры</h3>
+        <div class="printing-table-wrap">
+          <table class="printing-table" id="printing-printers">
+            <thead>
+              <tr><th scope="col">Принтер</th><th scope="col">Статус</th><th scope="col">Файл</th><th scope="col">Позиция</th><th scope="col">Кол-во</th></tr>
+            </thead>
+            <tbody id="printing-printers-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <p class="printing-empty" id="printing-empty" hidden>Сейчас ничего не печатается.</p>
+    </div>
+    <footer class="modal-foot">
       <span class="spacer"></span>
       <button class="btn" type="button" data-close>Закрыть</button>
     </footer>
