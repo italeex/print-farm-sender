@@ -179,7 +179,14 @@ let planData = null;
 let planBusy = false;
 let planEdited = false;
 let planLoaded = false;
+let planPeriod = "week";
+let planTabsEl = null;
+let planTableEl = null;
+let planTableBodyEl = null;
+let planEmptyEl = null;
+let planImportEl = null;
 const planInputs = {};
+const planDateEls = {};
 
 function pick(root, selectors) {
   for (const selector of selectors) {
@@ -2621,17 +2628,136 @@ function renderPlanCard(period) {
   }
   const inputs = planInputs[period] || {};
   if (planEdited) return;
-  if (inputs.parts) inputs.parts.value = String(Number(partsTarget) || 0);
   if (inputs.hours) inputs.hours.value = String(Number(hoursTarget) || 0);
+}
+
+function planDay(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""));
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function planWeekStart(date) {
+  const copy = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  copy.setDate(copy.getDate() - ((copy.getDay() + 6) % 7));
+  return copy;
+}
+
+function planShortDate(date) {
+  return (
+    String(date.getDate()).padStart(2, "0") +
+    "." +
+    String(date.getMonth() + 1).padStart(2, "0") +
+    "." +
+    date.getFullYear()
+  );
+}
+
+function planRange(period, data) {
+  const today = new Date();
+  if (period === "day") {
+    const date = planDay(data && (data.date || data.start)) || today;
+    return planShortDate(date);
+  }
+  if (period === "month") {
+    const start =
+      planDay(data && (data.month_start || data.start)) ||
+      new Date(today.getFullYear(), today.getMonth(), 1);
+    const end = new Date(start.getFullYear(), start.getMonth() + 1, 0);
+    return planShortDate(start) + " — " + planShortDate(end);
+  }
+  const start = planDay(data && (data.week_start || data.start)) || planWeekStart(today);
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+  return planShortDate(start) + " — " + planShortDate(end);
+}
+
+function planItemPercent(item) {
+  const provided = item ? item.percent : null;
+  if (provided !== null && provided !== undefined && provided !== "") {
+    const percent = Number(provided);
+    if (Number.isFinite(percent)) return Math.max(0, Math.min(100, Math.round(percent)));
+  }
+  const target = Number(item ? item.target : 0);
+  const actual = Number(item ? item.actual : 0);
+  if (!Number.isFinite(target) || target <= 0) return 0;
+  if (!Number.isFinite(actual) || actual <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((actual / target) * 100)));
+}
+
+function planItems() {
+  const data = planData && planData[planPeriod] ? planData[planPeriod] : null;
+  return data && Array.isArray(data.items) ? data.items.filter(Boolean) : [];
+}
+
+function syncPlanPeriod() {
+  if (!planTabsEl) return;
+  for (const button of planTabsEl.querySelectorAll("[data-plan-period]")) {
+    const active = button.dataset.planPeriod === planPeriod;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function renderPlanTable() {
+  if (!planTableBodyEl) return;
+  const items = planItems();
+  planTableBodyEl.textContent = "";
+  for (const item of items) {
+    const target = Number(item.target) || 0;
+    const actual = Number(item.actual) || 0;
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    nameCell.className = "plan-name";
+    const name = document.createElement("b");
+    name.textContent = String(item.name || item.code || "—");
+    nameCell.appendChild(name);
+    const code = String(item.code || "");
+    if (code && code !== name.textContent) {
+      const small = document.createElement("small");
+      small.textContent = code;
+      nameCell.appendChild(small);
+    }
+    row.appendChild(nameCell);
+    for (const value of [target, actual, Math.max(0, target - actual)]) {
+      const cell = document.createElement("td");
+      cell.className = "plan-num";
+      cell.textContent = formatPlanNumber(value);
+      row.appendChild(cell);
+    }
+    const percent = planItemPercent(item);
+    const percentCell = document.createElement("td");
+    percentCell.className = "plan-percent";
+    const track = document.createElement("div");
+    track.className = "plan-mini";
+    const bar = document.createElement("i");
+    bar.style.width = percent + "%";
+    track.appendChild(bar);
+    const label = document.createElement("span");
+    label.textContent = percent + " %";
+    percentCell.appendChild(track);
+    percentCell.appendChild(label);
+    row.appendChild(percentCell);
+    planTableBodyEl.appendChild(row);
+  }
+  if (planTableEl) planTableEl.hidden = items.length === 0;
+  if (planEmptyEl) planEmptyEl.hidden = items.length > 0;
+  setText(document.getElementById("plan-parts-badge"), items.length);
 }
 
 function renderPlan() {
   if (planBadgeEl) {
-    const day = planData && planData.day ? planData.day : null;
-    if (day) setText(planBadgeEl, "день " + formatPlanNumber(day.parts_done) + "/" + formatPlanNumber(day.parts_target));
-    else setText(planBadgeEl, "день —");
+    const week = planData && planData.week ? planData.week : null;
+    if (week) setText(planBadgeEl, "неделя " + formatPlanNumber(week.parts_done) + "/" + formatPlanNumber(week.parts_target));
+    else setText(planBadgeEl, "неделя —");
   }
-  for (const period of PLAN_PERIODS) renderPlanCard(period);
+  for (const period of PLAN_PERIODS) {
+    renderPlanCard(period);
+    const dates = planDateEls[period];
+    if (dates) setText(dates, planRange(period, planData ? planData[period] : null));
+  }
+  syncPlanPeriod();
+  renderPlanTable();
 }
 
 async function loadPlan() {
@@ -2652,11 +2778,74 @@ function openPlanModal() {
   renderPlan();
   openModal(modalPlan);
   loadPlan();
-  const first = planInputs.day ? planInputs.day.parts : null;
+  const first = planInputs[planPeriod] ? planInputs[planPeriod].hours : null;
   if (first) {
     window.setTimeout(function () {
       if (modalPlan && !modalPlan.hidden) first.focus();
     }, 0);
+  }
+}
+
+function planFilePaths(data) {
+  const lists = [];
+  if (Array.isArray(data)) lists.push(data);
+  if (data && typeof data === "object") {
+    for (const name of ["paths", "files", "selected", "entries", "items"]) {
+      if (Array.isArray(data[name])) lists.push(data[name]);
+    }
+    if (typeof data.path === "string" && /\.(xlsx|json)$/i.test(data.path)) lists.push([data.path]);
+  }
+  const seen = new Set();
+  const paths = [];
+  for (const list of lists) {
+    for (const item of list) {
+      let path = "";
+      if (typeof item === "string") path = item;
+      else if (item && typeof item === "object" && typeof item.path === "string") path = item.path;
+      if (!path || seen.has(path) || !/\.(xlsx|json)$/i.test(path)) continue;
+      seen.add(path);
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+async function importPlan() {
+  if (!planImportEl || planBusy || browseBusy) return;
+  planBusy = true;
+  planImportEl.disabled = true;
+  setText(planStatusEl, "Импорт…");
+  try {
+    const picked = await requestJSON("/api/fs/browse", {
+      method: "POST",
+      body: { initial_dir: state.lastDir || "", kind: "plan" },
+      timeout: BROWSE_TIMEOUT_MS,
+    });
+    const dir = picked && typeof picked.dir === "string" ? picked.dir : "";
+    if (dir) state.lastDir = dir;
+    const paths = planFilePaths(picked);
+    if (!paths.length) {
+      toast("Файл плана не выбран.", "warn");
+      setText(planStatusEl, "");
+      return;
+    }
+    const result = await requestJSON("/api/plan/import", {
+      method: "POST",
+      body: { path: paths[0] },
+      timeout: BROWSE_TIMEOUT_MS,
+    });
+    const days = Number(result && result.days) || 0;
+    const items = Array.isArray(result && result.items) ? result.items.length : Number(result && result.imported) || 0;
+    toast("Импортировано дней: " + days + ", деталей: " + items + ".");
+    setText(planStatusEl, "Импортировано");
+    planEdited = false;
+    await loadPlan();
+  } catch (error) {
+    setText(planStatusEl, "Ошибка импорта");
+    toast(errorText(error, "Не удалось импортировать план."), "error");
+  } finally {
+    planBusy = false;
+    planImportEl.disabled = false;
   }
 }
 
@@ -2666,11 +2855,9 @@ async function savePlan() {
     return planData[period];
   }).map(function (period) {
     const inputs = planInputs[period] || {};
-    const parts = Math.floor(Number(inputs.parts ? inputs.parts.value : 0));
     const hours = Number(inputs.hours ? inputs.hours.value : 0);
     return {
       period: period,
-      parts_target: Number.isFinite(parts) ? Math.max(0, parts) : 0,
       hours_target: Number.isFinite(hours) ? Math.max(0, hours) : 0,
     };
   });
@@ -2918,17 +3105,21 @@ function init() {
   planSaveEl = document.getElementById("plan-save");
   if (planSaveEl) planSaveEl.disabled = true;
   planStatusEl = document.getElementById("plan-status");
+  planTabsEl = document.getElementById("plan-tabs");
+  planTableEl = document.getElementById("plan-table");
+  planTableBodyEl = document.getElementById("plan-table-body");
+  planEmptyEl = document.getElementById("plan-empty");
+  planImportEl = document.getElementById("plan-import");
   for (const period of PLAN_PERIODS) {
+    planDateEls[period] = document.getElementById("plan-" + period + "-dates");
     planInputs[period] = {
-      parts: document.getElementById("plan-" + period + "-parts"),
       hours: document.getElementById("plan-" + period + "-hours"),
     };
-    for (const input of [planInputs[period].parts, planInputs[period].hours]) {
-      if (input) {
-        input.addEventListener("input", function () {
-          planEdited = true;
-        });
-      }
+    const input = planInputs[period].hours;
+    if (input) {
+      input.addEventListener("input", function () {
+        planEdited = true;
+      });
     }
   }
 
@@ -3096,6 +3287,19 @@ function init() {
 
   if (planButtonEl) planButtonEl.addEventListener("click", openPlanModal);
   if (planSaveEl) planSaveEl.addEventListener("click", savePlan);
+  if (planImportEl) planImportEl.addEventListener("click", importPlan);
+  if (planTabsEl) {
+    planTabsEl.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target ? target.closest("[data-plan-period]") : null;
+      if (!button) return;
+      const period = button.dataset.planPeriod || "week";
+      if (PLAN_PERIODS.indexOf(period) === -1 || period === planPeriod) return;
+      planPeriod = period;
+      syncPlanPeriod();
+      renderPlanTable();
+    });
+  }
   if (historyRangesEl) {
     historyRangesEl.addEventListener("click", function (event) {
       const target = event.target instanceof Element ? event.target : null;

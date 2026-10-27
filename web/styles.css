@@ -601,6 +601,44 @@ body.compact .grid { gap: 10px; }
 .plan-card .field-row { margin-top: 4px; }
 .plan-card .field label { font-size: 11px; }
 .plan-card .field input { padding: 7px 9px; font-size: 12.5px; }
+.plan-dates { margin: -2px 0 0; font-size: 11.5px; font-family: var(--mono); color: var(--muted-2); }
+.plan-tabs { width: fit-content; margin-bottom: 14px; }
+.plan-parts { margin-top: 16px; }
+.plan-parts-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.plan-parts-head h3 { margin: 0; font-size: 14px; font-weight: 620; }
+.plan-parts-head .badge {
+  font-size: 11px; padding: 3px 8px; border-radius: 999px; font-family: var(--mono);
+  background: #1a2130; border: 1px solid var(--border); color: #a9b6cc;
+}
+.plan-table-wrap {
+  max-height: 320px; overflow: auto; border: 1px solid var(--border-soft);
+  border-radius: 11px; background: #0d1016;
+}
+.plan-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.plan-table th {
+  position: sticky; top: 0; z-index: 1; padding: 9px 12px; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase;
+  color: var(--muted); background: #131822; border-bottom: 1px solid var(--border-soft);
+}
+.plan-table td { padding: 8px 12px; border-bottom: 1px solid #141922; }
+.plan-table tr:last-child td { border-bottom: 0; }
+.plan-table tbody tr:hover { background: #151b26; }
+.plan-table th:nth-child(n+2), .plan-table td:nth-child(n+2) { text-align: right; }
+.plan-name { min-width: 180px; }
+.plan-name b { display: block; font-weight: 600; color: #d7dfec; }
+.plan-name small { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
+.plan-num { font-family: var(--mono); color: #cfd8e8; white-space: nowrap; }
+.plan-percent { width: 140px; white-space: nowrap; }
+.plan-percent span { display: inline-block; min-width: 34px; font-family: var(--mono); color: var(--muted); }
+.plan-mini {
+  display: inline-block; width: 74px; height: 6px; margin-right: 8px;
+  vertical-align: middle; border-radius: 999px; overflow: hidden; background: #1a202c;
+}
+.plan-mini i {
+  display: block; height: 100%; transition: width .2s ease;
+  background: linear-gradient(90deg, #6b98ff, #7c5cff);
+}
+.plan-empty { margin: 0; padding: 18px 12px; text-align: center; font-size: 12.5px; color: var(--muted-2); }
 
 /* toasts */
 .toasts {

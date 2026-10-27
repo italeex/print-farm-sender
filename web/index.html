@@ -29,7 +29,7 @@
     </div>
     <button class="btn ghost" id="plan" type="button" title="План выпуска">
       План
-      <span class="badge" id="plan-badge">день —</span>
+      <span class="badge" id="plan-badge">неделя —</span>
     </button>
     <button class="btn" id="refresh" type="button">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 11A8 8 0 1 0 6 7"/><path d="M4 4v5h5"/></svg>
@@ -340,41 +340,63 @@
       <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
     </header>
     <div class="modal-body">
+      <div class="chips plan-tabs" id="plan-tabs" role="group" aria-label="Период плана">
+        <button class="chip" type="button" data-plan-period="day" aria-pressed="false">День</button>
+        <button class="chip active" type="button" data-plan-period="week" aria-pressed="true">Неделя</button>
+        <button class="chip" type="button" data-plan-period="month" aria-pressed="false">Месяц</button>
+      </div>
       <div class="plan-grid">
         <section class="plan-card">
           <header class="plan-head"><h3>День</h3><span class="badge" id="plan-day-badge">0 %</span></header>
+          <p class="plan-dates" id="plan-day-dates">—</p>
           <div class="plan-progress"><i id="plan-day-parts-bar" style="width:0%"></i></div>
           <p class="plan-line" id="plan-day-parts-text">деталей: 0 / 0</p>
           <div class="plan-progress"><i id="plan-day-hours-bar" style="width:0%"></i></div>
           <p class="plan-line" id="plan-day-hours-text">часов: 0 / 0</p>
           <div class="field-row">
-            <div class="field"><label for="plan-day-parts">Деталей</label><input id="plan-day-parts" type="number" min="0" step="1" value="0"></div>
             <div class="field"><label for="plan-day-hours">Часов</label><input id="plan-day-hours" type="number" min="0" step="0.5" value="0"></div>
           </div>
         </section>
         <section class="plan-card">
           <header class="plan-head"><h3>Неделя</h3><span class="badge" id="plan-week-badge">0 %</span></header>
+          <p class="plan-dates" id="plan-week-dates">—</p>
           <div class="plan-progress"><i id="plan-week-parts-bar" style="width:0%"></i></div>
           <p class="plan-line" id="plan-week-parts-text">деталей: 0 / 0</p>
           <div class="plan-progress"><i id="plan-week-hours-bar" style="width:0%"></i></div>
           <p class="plan-line" id="plan-week-hours-text">часов: 0 / 0</p>
           <div class="field-row">
-            <div class="field"><label for="plan-week-parts">Деталей</label><input id="plan-week-parts" type="number" min="0" step="1" value="0"></div>
             <div class="field"><label for="plan-week-hours">Часов</label><input id="plan-week-hours" type="number" min="0" step="0.5" value="0"></div>
           </div>
         </section>
         <section class="plan-card">
           <header class="plan-head"><h3>Месяц</h3><span class="badge" id="plan-month-badge">0 %</span></header>
+          <p class="plan-dates" id="plan-month-dates">—</p>
           <div class="plan-progress"><i id="plan-month-parts-bar" style="width:0%"></i></div>
           <p class="plan-line" id="plan-month-parts-text">деталей: 0 / 0</p>
           <div class="plan-progress"><i id="plan-month-hours-bar" style="width:0%"></i></div>
           <p class="plan-line" id="plan-month-hours-text">часов: 0 / 0</p>
           <div class="field-row">
-            <div class="field"><label for="plan-month-parts">Деталей</label><input id="plan-month-parts" type="number" min="0" step="1" value="0"></div>
             <div class="field"><label for="plan-month-hours">Часов</label><input id="plan-month-hours" type="number" min="0" step="0.5" value="0"></div>
           </div>
         </section>
       </div>
+      <section class="plan-parts">
+        <header class="plan-parts-head">
+          <h3>Детали</h3>
+          <span class="badge" id="plan-parts-badge">0</span>
+          <span class="spacer"></span>
+          <button class="btn ghost" id="plan-import" type="button">Импорт плана…</button>
+        </header>
+        <div class="plan-table-wrap">
+          <table class="plan-table" id="plan-table">
+            <thead>
+              <tr><th scope="col">Деталь</th><th scope="col">План</th><th scope="col">Факт</th><th scope="col">Остаток</th><th scope="col">%</th></tr>
+            </thead>
+            <tbody id="plan-table-body"></tbody>
+          </table>
+          <p class="plan-empty" id="plan-empty" hidden>Нет деталей в плане.</p>
+        </div>
+      </section>
     </div>
     <footer class="modal-foot">
       <span id="plan-status" role="status" aria-live="polite"></span>
