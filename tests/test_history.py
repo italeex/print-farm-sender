@@ -325,6 +325,55 @@ class HistoryStoreTests(unittest.TestCase):
             [(day, "ГР3.01.42000.01", 3), (other, "ГР3.02.10000.01", 4)],
         )
 
+    def test_import_plan_clears_full_range(self):
+        monday = datetime.fromtimestamp(BASE).date() - timedelta(
+            days=datetime.fromtimestamp(BASE).weekday()
+        )
+        days = [(monday + timedelta(days=offset)).isoformat() for offset in range(6)]
+        self.assertEqual(
+            self.history.import_plan(
+                [
+                    {"date": day, "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 1}
+                    for day in days
+                ]
+            )["days"],
+            6,
+        )
+        self.history.import_plan(
+            [{"date": days[0], "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 7}],
+            start=days[0],
+            end=days[-1],
+        )
+        rows = self.history._conn.execute(
+            "SELECT date, target FROM plan_items ORDER BY date"
+        ).fetchall()
+        self.assertEqual([(row["date"], row["target"]) for row in rows], [(days[0], 7)])
+
+    def test_import_plan_keeps_rows_outside_range(self):
+        monday = datetime.fromtimestamp(BASE).date() - timedelta(
+            days=datetime.fromtimestamp(BASE).weekday()
+        )
+        inside = monday.isoformat()
+        outside = (monday - timedelta(days=1)).isoformat()
+        self.history.import_plan(
+            [
+                {"date": inside, "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 1},
+                {"date": outside, "key": "ГР3.02.10000.01", "code": "", "name": "Корпус", "target": 2},
+            ]
+        )
+        self.history.import_plan(
+            [{"date": inside, "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 3}],
+            start=inside,
+            end=inside,
+        )
+        rows = self.history._conn.execute(
+            "SELECT date, target FROM plan_items ORDER BY date"
+        ).fetchall()
+        self.assertEqual(
+            [(row["date"], row["target"]) for row in rows],
+            [(outside, 2), (inside, 3)],
+        )
+
     def test_plan_items_actuals_from_complete(self):
         day = self.today()
         self.history.import_plan(
@@ -353,6 +402,18 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(item["actual"], 4)
         self.assertEqual(item["percent"], 40.0)
         self.assertEqual(item["days"], [{"date": day, "target": 10, "actual": 4}])
+
+    def test_plan_items_match_bare_stl_name(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10}]
+        )
+        printing = make_view("printing", "Крышка.gcode", [{"name": "МВСЛ.ГР3.01.42000.01.stl", "count": 6}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "Крышка.gcode"), printing, BASE + 60)
+        plan = self.history.plan(now=BASE + 60)["day"]
+        self.assertEqual(plan["items"][0]["actual"], 6)
+        self.assertEqual(plan["parts_percent"], 60.0)
 
     def test_plan_items_aggregate_week_and_month(self):
         moment = datetime.fromtimestamp(BASE)
@@ -397,6 +458,42 @@ class HistoryStoreTests(unittest.TestCase):
         later = self.history.plan(now=BASE + 40 * 86400)["day"]
         self.assertEqual(later["items"], [])
         self.assertEqual(later["parts_target"], 70)
+
+    def test_set_goal_keeps_missing_field(self):
+        self.history.set_goal("week", 100, 5.0)
+        self.history.set_goal("week", None, 7.5)
+        plan = self.history.plan(now=BASE)["week"]
+        self.assertEqual(plan["parts_target"], 100)
+        self.assertEqual(plan["hours_target"], 7.5)
+
+    def test_plan_periods_expose_iso_dates(self):
+        plan = self.history.plan(now=BASE)
+        for period in PERIODS:
+            data = plan[period]
+            self.assertRegex(data["start_date"], r"^\d{4}-\d{2}-\d{2}$")
+            self.assertRegex(data["end_date"], r"^\d{4}-\d{2}-\d{2}$")
+            self.assertRegex(data["week_start"], r"^\d{4}-\d{2}-\d{2}$")
+            self.assertLessEqual(data["start_date"], data["end_date"])
+        week = plan["week"]
+        self.assertEqual(week["start_date"], week["week_start"])
+        self.assertEqual(week["start_date"], "2023-11-13")
+        self.assertEqual(week["end_date"], "2023-11-19")
+        self.assertEqual(week["start_date"], self.history.plan(now=BASE)["day"]["week_start"])
+
+    def test_prune_drops_old_plan_items(self):
+        today = datetime.fromtimestamp(BASE).date()
+        old = (today - timedelta(days=200)).isoformat()
+        fresh = (today - timedelta(days=1)).isoformat()
+        self.history.import_plan(
+            [
+                {"date": old, "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 1},
+                {"date": fresh, "key": "ГР3.01.42000.01", "code": "", "name": "Крышка", "target": 2},
+            ]
+        )
+        self.history._prune(BASE)
+        self.history._conn.commit()
+        rows = self.history._conn.execute("SELECT date FROM plan_items ORDER BY date").fetchall()
+        self.assertEqual([row["date"] for row in rows], [fresh])
 
 
 if __name__ == "__main__":

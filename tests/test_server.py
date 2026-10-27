@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
@@ -1032,18 +1032,71 @@ class ApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["imported"], 1)
         self.assertEqual(payload["days"], 1)
+        self.assertEqual(payload["days_with_items"], 1)
         self.assertEqual(payload["week_start"], today)
+        self.assertEqual(payload["start_date"], today)
+        self.assertEqual(payload["end_date"], today)
         self.assertEqual(payload["items"][0]["key"], "ГР3.01.42000.01")
         plan = requests.get(self.url("/api/plan"), timeout=3).json()
         self.assertEqual(plan["day"]["parts_target"], 12)
         self.assertEqual(plan["day"]["items"][0]["target"], 12)
         self.assertEqual(plan["day"]["items"][0]["code"], "МВСЛ.ГР3.01.42000.01")
         self.assertEqual(plan["week"]["parts_target"], 12)
+        self.assertEqual(plan["week"]["start_date"], plan["week"]["week_start"])
         write_plan_xlsx(path, [today], [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (5,))])
         again = requests.post(self.url("/api/plan/import"), json={"path": str(path)}, timeout=5)
         self.assertEqual(again.status_code, 200)
         plan = requests.get(self.url("/api/plan"), timeout=3).json()
         self.assertEqual(plan["day"]["parts_target"], 5)
+
+    def test_plan_import_replaces_whole_week(self):
+        monday = datetime.fromtimestamp(time.time()).date()
+        monday -= timedelta(days=monday.weekday())
+        days = [(monday + timedelta(days=offset)).isoformat() for offset in range(6)]
+        path = Path(self.tmp.name) / "План график.xlsx"
+        write_plan_xlsx(path, days, [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (3, 3, 3, 3, 3, 3))])
+        first = requests.post(self.url("/api/plan/import"), json={"path": str(path)}, timeout=5)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["days"], 6)
+        write_plan_xlsx(path, [days[0]], [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (9,))])
+        second = requests.post(self.url("/api/plan/import"), json={"path": str(path)}, timeout=5)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["days"], 1)
+        rows = self.history._conn.execute(
+            "SELECT date, target FROM plan_items ORDER BY date"
+        ).fetchall()
+        self.assertEqual([(row["date"], row["target"]) for row in rows], [(days[0], 9)])
+
+    def test_plan_import_counts_date_columns(self):
+        today = datetime.fromtimestamp(time.time()).date()
+        days = [today.isoformat(), (today + timedelta(days=1)).isoformat()]
+        path = Path(self.tmp.name) / "План график.xlsx"
+        write_plan_xlsx(path, days, [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (5, None))])
+        response = requests.post(self.url("/api/plan/import"), json={"path": str(path)}, timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["days"], 2)
+        self.assertEqual(payload["days_with_items"], 1)
+        self.assertEqual(payload["start_date"], days[0])
+        self.assertEqual(payload["end_date"], days[1])
+
+    def test_plan_save_keeps_parts_target(self):
+        initial = requests.post(
+            self.url("/api/plan"),
+            json={"period": "week", "parts_target": 100, "hours_target": 5},
+            timeout=3,
+        )
+        self.assertEqual(initial.status_code, 200)
+        response = requests.post(
+            self.url("/api/plan"),
+            json={"period": "week", "hours_target": 7.5},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["week"]["parts_target"], 100)
+        self.assertEqual(response.json()["week"]["hours_target"], 7.5)
+        fetched = requests.get(self.url("/api/plan"), timeout=3).json()
+        self.assertEqual(fetched["week"]["parts_target"], 100)
 
     def test_fs_browse_plan_kind(self):
         plan = Path(self.tmp.name) / "plan.xlsx"

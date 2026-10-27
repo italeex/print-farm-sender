@@ -2,7 +2,7 @@ import json
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from farm_core import APP_DIR
@@ -110,6 +110,22 @@ def _day_of(value: float) -> str:
         return datetime.fromtimestamp(value).date().isoformat()
     except (OSError, OverflowError, ValueError):
         return (datetime(1970, 1, 1) + timedelta(seconds=value)).date().isoformat()
+
+
+def _iso_day(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        return ""
+
+
+def _period_dates(start: float, end: float) -> tuple[str, str, str]:
+    first = date.fromisoformat(_day_of(start))
+    last = date.fromisoformat(_day_of(end - 1.0))
+    return first.isoformat(), last.isoformat(), (first - timedelta(days=first.weekday())).isoformat()
 
 
 def _period_bounds(period: str, now: float) -> tuple[float, float]:
@@ -319,10 +335,14 @@ class HistoryStore:
                     parts_target = int(goal["parts_target"])
                 hours_target = float(goal["hours_target"]) if goal is not None else 0.0
                 parts_done = int(parts_done)
+                start_date, end_date, week_start = _period_dates(start, end)
                 result[period] = {
                     "period": period,
                     "start": start,
                     "end": end,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "week_start": week_start,
                     "parts_target": parts_target,
                     "hours_target": hours_target,
                     "parts_done": parts_done,
@@ -333,7 +353,7 @@ class HistoryStore:
                 }
             return result
 
-    def import_plan(self, items) -> dict:
+    def import_plan(self, items, start=None, end=None) -> dict:
         rows = []
         for item in items or []:
             if not isinstance(item, dict):
@@ -348,26 +368,43 @@ class HistoryStore:
                 continue
             rows.append((day, key, str(item.get("code") or ""), str(item.get("name") or ""), target))
         days = sorted({row[0] for row in rows})
+        first = _iso_day(start) or (days[0] if days else "")
+        last = _iso_day(end) or (days[-1] if days else "")
         with self._lock:
-            if days:
+            if first and last and first <= last:
+                self._conn.execute(
+                    "DELETE FROM plan_items WHERE date >= ? AND date <= ?", (first, last)
+                )
+            elif days:
                 marks = ", ".join("?" for _ in days)
                 self._conn.execute(f"DELETE FROM plan_items WHERE date IN ({marks})", days)
+            if rows:
                 self._conn.executemany(
                     "INSERT OR REPLACE INTO plan_items (date, part_key, code, name, target) "
                     "VALUES (?, ?, ?, ?, ?)",
                     rows,
                 )
+            if rows or first:
                 self._conn.commit()
         return {"imported": len(rows), "days": len(days)}
 
-    def set_goal(self, period, parts_target, hours_target) -> dict:
+    def set_goal(self, period, parts_target=None, hours_target=None) -> dict:
         if period not in PERIODS:
             raise ValueError(f"Неизвестный период: {period}")
-        parts = int(parts_target)
-        hours = float(hours_target)
-        if parts < 0 or hours < 0:
-            raise ValueError("Цели не могут быть отрицательными")
         with self._lock:
+            row = self._conn.execute(
+                "SELECT parts_target, hours_target FROM goals WHERE period = ?", (period,)
+            ).fetchone()
+            if parts_target is None and row is not None:
+                parts = int(row["parts_target"])
+            else:
+                parts = int(parts_target or 0)
+            if hours_target is None and row is not None:
+                hours = float(row["hours_target"])
+            else:
+                hours = float(hours_target or 0)
+            if parts < 0 or hours < 0:
+                raise ValueError("Цели не могут быть отрицательными")
             self._conn.execute(
                 "INSERT INTO goals (period, parts_target, hours_target) VALUES (?, ?, ?) "
                 "ON CONFLICT(period) DO UPDATE SET "
@@ -494,7 +531,9 @@ class HistoryStore:
 
     def _prune(self, moment: float) -> None:
         self._last_prune = moment
-        self._conn.execute("DELETE FROM events WHERE ts < ?", (moment - RETENTION_SECONDS,))
+        cutoff = moment - RETENTION_SECONDS
+        self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+        self._conn.execute("DELETE FROM plan_items WHERE date < ?", (_day_of(cutoff),))
 
     @staticmethod
     def _append(result, state, start, end, filename) -> None:

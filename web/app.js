@@ -2655,21 +2655,28 @@ function planShortDate(date) {
 }
 
 function planRange(period, data) {
+  const start = planDay(
+    data && (data.start_date || data.week_start || data.date || data.start)
+  );
+  const end = planDay(data && (data.end_date || data.month_end || data.start_date || data.week_start));
+  if (start && end) {
+    return period === "day" ? planShortDate(start) : planShortDate(start) + " — " + planShortDate(end);
+  }
   const today = new Date();
   if (period === "day") {
     const date = planDay(data && (data.date || data.start)) || today;
     return planShortDate(date);
   }
   if (period === "month") {
-    const start =
+    const fallback =
       planDay(data && (data.month_start || data.start)) ||
       new Date(today.getFullYear(), today.getMonth(), 1);
-    const end = new Date(start.getFullYear(), start.getMonth() + 1, 0);
-    return planShortDate(start) + " — " + planShortDate(end);
+    const monthEnd = new Date(fallback.getFullYear(), fallback.getMonth() + 1, 0);
+    return planShortDate(fallback) + " — " + planShortDate(monthEnd);
   }
-  const start = planDay(data && (data.week_start || data.start)) || planWeekStart(today);
-  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
-  return planShortDate(start) + " — " + planShortDate(end);
+  const weekStart = planWeekStart(planDay(data && data.start) || today);
+  const weekEnd = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 6);
+  return planShortDate(weekStart) + " — " + planShortDate(weekEnd);
 }
 
 function planItemPercent(item) {
@@ -2746,10 +2753,16 @@ function renderPlanTable() {
 }
 
 function renderPlan() {
-  if (planBadgeEl) {
-    const week = planData && planData.week ? planData.week : null;
-    if (week) setText(planBadgeEl, "неделя " + formatPlanNumber(week.parts_done) + "/" + formatPlanNumber(week.parts_target));
-    else setText(planBadgeEl, "неделя —");
+  let badgeText = "неделя —";
+  if (planData && planData.week) {
+    const week = planData.week;
+    badgeText = "неделя " + formatPlanNumber(week.parts_done) + "/" + formatPlanNumber(week.parts_target);
+  }
+  if (planBadgeEl) setText(planBadgeEl, badgeText);
+  if (planButtonEl) {
+    const label = "План выпуска · " + badgeText;
+    planButtonEl.title = label;
+    planButtonEl.setAttribute("aria-label", label);
   }
   for (const period of PLAN_PERIODS) {
     renderPlanCard(period);
@@ -2814,6 +2827,7 @@ async function importPlan() {
   if (!planImportEl || planBusy || browseBusy) return;
   planBusy = true;
   planImportEl.disabled = true;
+  if (planSaveEl) planSaveEl.disabled = true;
   setText(planStatusEl, "Импорт…");
   try {
     const picked = await requestJSON("/api/fs/browse", {
@@ -2836,7 +2850,10 @@ async function importPlan() {
     });
     const days = Number(result && result.days) || 0;
     const items = Array.isArray(result && result.items) ? result.items.length : Number(result && result.imported) || 0;
-    toast("Импортировано дней: " + days + ", деталей: " + items + ".");
+    const from = planDay(result && (result.start_date || result.week_start));
+    const to = planDay(result && (result.end_date || result.start_date || result.week_start));
+    const span = from && to ? planShortDate(from) + " — " + planShortDate(to) + ": " : "";
+    toast("Импортировано " + span + "дней " + days + ", деталей " + items + ".");
     setText(planStatusEl, "Импортировано");
     planEdited = false;
     await loadPlan();
@@ -2846,6 +2863,7 @@ async function importPlan() {
   } finally {
     planBusy = false;
     planImportEl.disabled = false;
+    if (planSaveEl) planSaveEl.disabled = !planLoaded;
   }
 }
 

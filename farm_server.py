@@ -11,6 +11,7 @@ import threading
 import time
 import webbrowser
 from collections import deque
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -145,6 +146,24 @@ def existing_gcode_paths(items) -> list[str]:
 
 def existing_plan_paths(items) -> list[str]:
     return _existing_paths(items, PLAN_SUFFIXES)
+
+
+def _plan_span(parsed) -> tuple[str, str]:
+    days = [day for day in parsed.get("days") or [] if isinstance(day, str) and day]
+    if not days:
+        days = [parsed.get("week_start") or ""]
+    days = [day for day in days if day]
+    if not days:
+        return "", ""
+    try:
+        first = date.fromisoformat(min(days))
+        last = date.fromisoformat(max(days))
+    except ValueError:
+        return days[0], days[-1]
+    return (
+        (first - timedelta(days=first.weekday())).isoformat(),
+        (last + timedelta(days=6 - last.weekday())).isoformat(),
+    )
 
 
 def _native_browse_files(initial_dir: str = "", kind: str = "gcode") -> list[str]:
@@ -505,14 +524,18 @@ class FarmHandler(BaseHTTPRequestHandler):
         if not isinstance(period, str) or period not in PERIODS:
             self._send_error(400, "Период должен быть day, week или month")
             return
-        parts_target = self._target_int(payload.get("parts_target", 0))
-        if parts_target is None:
-            self._send_error(400, "Число деталей должно быть целым и не меньше нуля")
-            return
-        hours_target = self._target_float(payload.get("hours_target", 0))
-        if hours_target is None:
-            self._send_error(400, "Целевые часы должны быть числом не меньше нуля")
-            return
+        parts_target = None
+        if payload.get("parts_target") is not None:
+            parts_target = self._target_int(payload.get("parts_target"))
+            if parts_target is None:
+                self._send_error(400, "Число деталей должно быть целым и не меньше нуля")
+                return
+        hours_target = None
+        if payload.get("hours_target") is not None:
+            hours_target = self._target_float(payload.get("hours_target"))
+            if hours_target is None:
+                self._send_error(400, "Целевые часы должны быть числом не меньше нуля")
+                return
         self.app.history.set_goal(period, parts_target, hours_target)
         self._send_json(self.app.history.plan())
 
@@ -592,16 +615,22 @@ class FarmHandler(BaseHTTPRequestHandler):
         except (OSError, ValueError) as exc:
             self._send_error(400, str(exc) or "Не удалось прочитать файл плана")
             return
-        result = self.app.history.import_plan(parsed["items"])
+        result = self.app.history.import_plan(parsed["items"], *_plan_span(parsed))
         if not result["imported"]:
             self._send_error(400, "В файле плана нет данных")
             return
-        self.app.journal.add(f"План импортирован: деталей {result['imported']}, дней {result['days']}")
+        days = list(parsed["days"])
+        first = days[0] if days else parsed["week_start"]
+        last = days[-1] if days else parsed["week_start"]
+        self.app.journal.add(f"План импортирован: деталей {result['imported']}, дней {len(days)}")
         self._send_json(
             {
                 "imported": result["imported"],
-                "days": result["days"],
+                "days": len(days),
+                "days_with_items": result["days"],
                 "week_start": parsed["week_start"],
+                "start_date": first,
+                "end_date": last,
                 "items": parsed["items"],
             }
         )
