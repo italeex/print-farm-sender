@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import math
 import os
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from farm_core import (
     print_action,
     save_config,
 )
+from farm_history import PERIODS, HistoryStore
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
@@ -50,6 +52,9 @@ NO_CACHE = "no-cache, no-store, must-revalidate"
 IMAGE_CACHE = "no-cache"
 BROWSE_TIMEOUT = 300.0
 NAME_MAX_LEN = 60
+HISTORY_LIMIT = 500
+HISTORY_MAX_LIMIT = 5000
+DAY_SECONDS = 86400.0
 APP_VERSION = "2.3.0"
 CONFIG_LOCK = threading.RLock()
 BROWSE_LOCK = threading.Lock()
@@ -190,6 +195,7 @@ class FarmApp:
         browse_files=None,
         scan_func=None,
         ui_detect_func=None,
+        history=None,
     ) -> None:
         self.config_path = Path(config_path)
         self.idle_timeout = float(idle_timeout)
@@ -199,6 +205,7 @@ class FarmApp:
         self.ui_detect_func = ui_detect_func if ui_detect_func is not None else detect_ui
         self.journal = Journal()
         self.thumb_cache = ThumbCache()
+        self.history = history if history is not None else HistoryStore()
         self.config_error = ""
         self._stopped = False
         self._shutdown_lock = threading.Lock()
@@ -271,6 +278,10 @@ class FarmApp:
             self.job.cancel()
         except Exception:
             LOGGER.exception("Не удалось отменить задачу")
+        try:
+            self.history.close()
+        except Exception:
+            LOGGER.exception("Не удалось закрыть историю")
         server = self.server
         if server is not None:
             server.shutdown()
@@ -305,6 +316,12 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/thumb/"):
             self._api_thumb(path[len("/api/thumb/"):])
+            return
+        if path == "/api/plan":
+            self._send_json(self.app.history.plan())
+            return
+        if path.startswith("/api/history/"):
+            self._api_history(path[len("/api/history/"):], query)
             return
         if path in STATIC_ROUTES:
             target = self._resolve_static(path)
@@ -352,6 +369,9 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/printers":
             self._api_printer_create()
+            return
+        if path == "/api/plan":
+            self._api_plan()
             return
         if path.startswith("/api/print/"):
             self._api_print(path[len("/api/print/"):])
@@ -410,6 +430,47 @@ class FarmHandler(BaseHTTPRequestHandler):
         entries = [entry for entry in self.app.journal.snapshot() if entry["id"] > since]
         last = entries[-1]["id"] if entries else since
         self._send_json({"entries": entries, "next": last})
+
+    def _api_history(self, raw_key: str, query) -> None:
+        key = raw_key.strip("/")
+        if not any(printer.key == key for printer in self.app.config.printers):
+            self._send_error(404, "Принтер не найден")
+            return
+        now = time.time()
+        since = self._query_float(query, "since", now - DAY_SECONDS)
+        until = self._query_float(query, "until", 0.0)
+        until_value = until if until > 0 else None
+        limit = self._query_int(query, "limit")
+        if limit <= 0:
+            limit = HISTORY_LIMIT
+        history = self.app.history
+        self._send_json(
+            {
+                "printer": key,
+                "events": history.events(key, since, until_value, min(limit, HISTORY_MAX_LIMIT)),
+                "segments": history.segments(key, since, until_value),
+                "last_completion": history.last_completion(key),
+            }
+        )
+
+    def _api_plan(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        period = payload.get("period")
+        if not isinstance(period, str) or period not in PERIODS:
+            self._send_error(400, "Период должен быть day, week или month")
+            return
+        parts_target = self._target_int(payload.get("parts_target", 0))
+        if parts_target is None:
+            self._send_error(400, "Число деталей должно быть целым и не меньше нуля")
+            return
+        hours_target = self._target_float(payload.get("hours_target", 0))
+        if hours_target is None:
+            self._send_error(400, "Целевые часы должны быть числом не меньше нуля")
+            return
+        self.app.history.set_goal(period, parts_target, hours_target)
+        self._send_json(self.app.history.plan())
 
     def _api_fs(self, query) -> None:
         raw = self._query_text(query, "path")
@@ -906,6 +967,32 @@ class FarmHandler(BaseHTTPRequestHandler):
             return int(raw)
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _query_float(query, name: str, fallback: float) -> float:
+        raw = (query.get(name) or [""])[0].strip()
+        if not raw:
+            return fallback
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return fallback
+
+    @staticmethod
+    def _target_int(raw):
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        if not math.isfinite(raw) or raw < 0 or int(raw) != raw:
+            return None
+        return int(raw)
+
+    @staticmethod
+    def _target_float(raw):
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        if not math.isfinite(raw) or raw < 0:
+            return None
+        return float(raw)
 
     def _etag_matches(self, etag: str) -> bool:
         header = (self.headers.get("If-None-Match") or "").strip()

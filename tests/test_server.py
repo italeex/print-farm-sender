@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests
 
 from farm_monitor import PrinterView, summarize
+from farm_history import HistoryStore
 from farm_server import APP_VERSION, FarmApp, Journal, create_server, find_running_instance
 from tests.fake_moonraker import FakeMoonraker, gcode_with_thumb
 
@@ -54,8 +55,13 @@ class ServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "printers.json"
             path.write_text('{"printers": []}', encoding="utf-8")
-            app = FarmApp(config_path=path, start_monitor=False)
+            app = FarmApp(
+                config_path=path,
+                start_monitor=False,
+                history=HistoryStore(Path(folder) / "farm_history.db"),
+            )
             snapshot = app.state_snapshot()
+            app.shutdown()
         self.assertEqual(snapshot["version"], APP_VERSION)
         self.assertIsInstance(snapshot["started_at"], float)
 
@@ -133,20 +139,30 @@ class ServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "printers.json"
             path.write_text('{"printers": []}', encoding="utf-8")
-            app = FarmApp(config_path=path, start_monitor=False)
+            app = FarmApp(
+                config_path=path,
+                start_monitor=False,
+                history=HistoryStore(Path(folder) / "farm_history.db"),
+            )
             app.last_heartbeat = 100
             self.assertFalse(app.should_shutdown(200))
             self.assertTrue(app.should_shutdown(100 + app.idle_timeout + 1))
+            app.shutdown()
 
     def test_broken_config_quarantined(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "printers.json"
             path.write_text("{", encoding="utf-8")
             with self.assertLogs("farm_server", level="ERROR"):
-                app = FarmApp(config_path=path, start_monitor=False)
+                app = FarmApp(
+                    config_path=path,
+                    start_monitor=False,
+                    history=HistoryStore(Path(folder) / "farm_history.db"),
+                )
             self.assertEqual(app.config.printers, [])
             self.assertTrue(Path(str(path) + ".broken").exists())
             self.assertFalse(path.exists())
+            app.shutdown()
 
     def test_broken_config_journaled_when_rename_fails(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -154,9 +170,14 @@ class ServerTests(unittest.TestCase):
             path.write_text("{", encoding="utf-8")
             with mock.patch("pathlib.Path.replace", side_effect=OSError("locked")):
                 with self.assertLogs("farm_server", level="ERROR"):
-                    app = FarmApp(config_path=path, start_monitor=False)
+                    app = FarmApp(
+                        config_path=path,
+                        start_monitor=False,
+                        history=HistoryStore(Path(folder) / "farm_history.db"),
+                    )
             messages = [entry["message"] for entry in app.journal.snapshot()]
             self.assertTrue(any("Конфигурация не загружена" in message for message in messages))
+            app.shutdown()
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"thumbnail" * 8
@@ -192,6 +213,8 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.history = HistoryStore(Path(self.tmp.name) / "farm_history.db")
+        self.addCleanup(self.history.close)
         self.moonraker = FakeMoonraker().start()
         self.addCleanup(self.moonraker.stop)
         self.key = f"127.0.0.1:{self.moonraker.port}"
@@ -248,6 +271,7 @@ class ApiTests(unittest.TestCase):
             monitor=self.monitor,
             start_monitor=False,
             browse_files=browse_stub,
+            history=self.history,
         )
         self.addCleanup(self.app.job.cancel)
         self.gcode = Path(self.tmp.name) / "part.gcode"
@@ -845,6 +869,128 @@ class ApiTests(unittest.TestCase):
         response = requests.get(self.url(f"/api/journal?since={last}"), timeout=3)
         self.assertEqual([entry["message"] for entry in response.json()["entries"]], ["третье"])
         self.assertEqual(response.json()["next"], last + 1)
+
+    def history_url(self, query=""):
+        return self.url("/api/history/" + quote(self.key, safe="") + query)
+
+    def record_cycle(self, now):
+        printing = replace(
+            self.monitor.view,
+            state="printing",
+            file="деталь.gcode",
+            parts=[{"name": "Корпус", "count": 35}],
+        )
+        idle = replace(printing, state="idle", parts=[])
+        self.history.record(printing, None, now - 60)
+        self.history.record(idle, printing, now)
+        return printing, idle
+
+    def test_history_shape(self):
+        now = time.time()
+        self.record_cycle(now)
+        response = requests.get(self.history_url("?since=0"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["printer"], self.key)
+        self.assertEqual([event["event"] for event in payload["events"]], ["state", "complete"])
+        self.assertEqual(payload["last_completion"]["parts"], 35)
+        self.assertEqual(payload["segments"][-1]["state"], "idle")
+        self.assertEqual(payload["segments"][-1]["file"], "деталь.gcode")
+
+    def test_history_default_window_hides_old_events(self):
+        now = time.time()
+        self.record_cycle(now - 2 * 86400)
+        payload = requests.get(self.history_url(), timeout=3).json()
+        self.assertEqual(payload["events"], [])
+        self.assertIsNotNone(payload["last_completion"])
+
+    def test_history_limit(self):
+        now = time.time()
+        view = replace(self.monitor.view, file="деталь.gcode")
+        for index in range(4):
+            state = "printing" if index % 2 == 0 else "paused"
+            previous = replace(view, state="paused" if state == "printing" else "printing") if index else None
+            self.history.record(replace(view, state=state), previous, now - 30 + index * 5)
+        payload = requests.get(self.history_url("?since=0&limit=2"), timeout=3).json()
+        self.assertEqual(len(payload["events"]), 2)
+
+    def test_history_unknown_printer_404(self):
+        response = requests.get(self.url("/api/history/10.0.0.1:7125"), timeout=3)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("не найден", response.json()["error"])
+
+    def test_plan_defaults(self):
+        response = requests.get(self.url("/api/plan"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(sorted(payload), ["day", "month", "week"])
+        for period in ("day", "week", "month"):
+            self.assertEqual(payload[period]["parts_target"], 0)
+            self.assertEqual(payload[period]["hours_target"], 0.0)
+
+    def test_plan_upsert(self):
+        response = requests.post(
+            self.url("/api/plan"),
+            json={"period": "week", "parts_target": 100, "hours_target": 20.5},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["week"]["parts_target"], 100)
+        self.assertEqual(response.json()["week"]["hours_target"], 20.5)
+        again = requests.post(
+            self.url("/api/plan"),
+            json={"period": "week", "parts_target": 50, "hours_target": 10},
+            timeout=3,
+        )
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.json()["week"]["parts_target"], 50)
+        fetched = requests.get(self.url("/api/plan"), timeout=3).json()
+        self.assertEqual(fetched["week"]["parts_target"], 50)
+        self.assertEqual(fetched["day"]["parts_target"], 0)
+
+    def test_plan_counts_completed_parts(self):
+        now = time.time()
+        self.record_cycle(now)
+        requests.post(
+            self.url("/api/plan"),
+            json={"period": "day", "parts_target": 70, "hours_target": 0},
+            timeout=3,
+        )
+        payload = requests.get(self.url("/api/plan"), timeout=3).json()
+        self.assertEqual(payload["day"]["parts_done"], 35)
+        self.assertEqual(payload["day"]["parts_percent"], 50.0)
+
+    def test_plan_validation(self):
+        bad_period = requests.post(
+            self.url("/api/plan"),
+            json={"period": "year", "parts_target": 1, "hours_target": 1},
+            timeout=3,
+        )
+        self.assertEqual(bad_period.status_code, 400)
+        self.assertIn("Период", bad_period.json()["error"])
+        bad_parts = requests.post(
+            self.url("/api/plan"),
+            json={"period": "day", "parts_target": -1, "hours_target": 1},
+            timeout=3,
+        )
+        self.assertEqual(bad_parts.status_code, 400)
+        self.assertIn("деталей", bad_parts.json()["error"])
+        bad_hours = requests.post(
+            self.url("/api/plan"),
+            json={"period": "day", "parts_target": 1, "hours_target": -0.5},
+            timeout=3,
+        )
+        self.assertEqual(bad_hours.status_code, 400)
+        self.assertIn("часы", bad_hours.json()["error"])
+        missing = requests.post(self.url("/api/plan"), json={}, timeout=3)
+        self.assertEqual(missing.status_code, 400)
+        not_json = requests.post(
+            self.url("/api/plan"),
+            data=b"{}",
+            headers={"Content-Type": "text/plain"},
+            timeout=3,
+        )
+        self.assertEqual(not_json.status_code, 415)
 
 
 if __name__ == "__main__":

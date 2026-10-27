@@ -176,12 +176,21 @@ def summarize(views) -> FarmSummary:
 
 class FarmMonitor:
     def __init__(
-        self, config: AppConfig, *, thumb_cache: ThumbCache, interval=None, clock=time.time, ui_detect=None
+        self,
+        config: AppConfig,
+        *,
+        thumb_cache: ThumbCache,
+        interval=None,
+        clock=time.time,
+        ui_detect=None,
+        history=None,
     ) -> None:
         self._thumb_cache = thumb_cache
         self._interval = float(interval if interval is not None else config.refresh_seconds)
         self._clock = clock
         self._detect_ui = ui_detect if ui_detect is not None else detect_ui
+        self._history = history
+        self._history_pending = []
         self._printers = list(config.printers)
         self._views: dict[str, PrinterView] = {}
         self._next_due: dict[str, float] = {printer.key: 0.0 for printer in self._printers}
@@ -277,6 +286,7 @@ class FarmMonitor:
                     filename = self._apply(printer, result)
             except Exception:
                 LOGGER.exception("Не удалось применить результат опроса принтера %s", printer.name)
+            self._flush_history()
             if filename:
                 self._submit_thumb(printer, filename)
         with self._lock:
@@ -505,6 +515,7 @@ class FarmMonitor:
             if previous is not None:
                 view = replace(view, last_seen=previous.last_seen, thumb_version=previous.thumb_version, ui_kind=previous.ui_kind, parts=previous.parts)
             self._views[key] = view
+            self._history_pending.append((view, previous, now))
             return ""
         self._failures[key] = 0
         self._next_due[key] = now + self._interval
@@ -525,6 +536,7 @@ class FarmMonitor:
                 view = build_view(printer, info=info, status=None, now=now, error=error, thumb_version="", ui_kind=ui_kind)
             self._last_error[key] = error
             self._views[key] = view
+            self._history_pending.append((view, previous, now))
             return ""
         filename = str((status.get("print_stats") or {}).get("filename") or "")
         thumb_version = self._thumb_cache.version((key, filename)) if filename else ""
@@ -537,4 +549,17 @@ class FarmMonitor:
         elif error is not None:
             self._last_error[key] = error
         self._views[key] = view
+        self._history_pending.append((view, previous, now))
         return filename
+
+    def _flush_history(self) -> None:
+        with self._lock:
+            pending = self._history_pending
+            self._history_pending = []
+        if not pending or self._history is None:
+            return
+        for view, previous, now in pending:
+            try:
+                self._history.record(view, previous, now)
+            except Exception:
+                LOGGER.exception("Не удалось записать историю принтера %s", view.key)

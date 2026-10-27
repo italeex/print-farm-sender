@@ -4,6 +4,7 @@ printers.json
 printers.json.broken
 farm.log
 farm.log.*
+farm_history.db*
 .superpowers/
 
 .projectmem/events.jsonl

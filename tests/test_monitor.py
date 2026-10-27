@@ -1,5 +1,6 @@
 import logging
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from farm_core import AppConfig, Printer
 from farm_errors import ErrorInfo
+from farm_history import HistoryStore
 from farm_monitor import FarmMonitor, PrinterView, build_view, summarize
 from farm_thumbs import ThumbCache
 from tests.fake_moonraker import FakeMoonraker, FakeUI
@@ -180,7 +182,7 @@ class PollerTests(unittest.TestCase):
         logging.disable(logging.WARNING)
         self.addCleanup(logging.disable, logging.NOTSET)
 
-    def make_monitor(self, server, interval=5, clock=time.time, mainsail_port=4408, ui_detect=None):
+    def make_monitor(self, server, interval=5, clock=time.time, mainsail_port=4408, ui_detect=None, history=None):
         printer = Printer("test", "127.0.0.1", server.port, mainsail_port)
         config = AppConfig(printers=[printer], refresh_seconds=interval)
         monitor = FarmMonitor(
@@ -189,6 +191,7 @@ class PollerTests(unittest.TestCase):
             interval=interval,
             clock=clock,
             ui_detect=ui_detect,
+            history=history,
         )
         monitor.set_printers(config.printers)
         self.addCleanup(monitor.stop)
@@ -571,6 +574,66 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(view["state"], "offline")
         self.assertEqual(view["ui_kind"], "fluidd")
         self.assertEqual(len(calls), 1)
+
+    def test_history_records_print_transitions(self):
+        server = FakeMoonraker(
+            thumb=b"\x89PNG\r\n\x1a\nx",
+            parts=["Деталь_id_0_copy_0", "Деталь_id_1_copy_0"],
+        ).start()
+        self.addCleanup(server.stop)
+        clock = FakeClock(1000.0)
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        history = HistoryStore(Path(folder) / "farm_history.db", clock=clock)
+        self.addCleanup(history.close)
+        monitor = self.make_monitor(server, clock=clock, history=history)
+        key = monitor._printers[0].key
+        filename = "деталь 7.gcode"
+        monitor.poll_once()
+        clock.now = 1100.0
+        server.objects = {"print_stats": {"state": "paused", "filename": filename}}
+        monitor.poll_once()
+        clock.now = 1200.0
+        server.objects = {"print_stats": {"state": "printing", "filename": filename}}
+        monitor.poll_once()
+        clock.now = 1300.0
+        server.objects = {"print_stats": {"state": "complete", "filename": filename}}
+        monitor.poll_once()
+        self.drain_thumbs(monitor)
+        events = history.events(key, 0)
+        self.assertEqual([event["event"] for event in events], ["state", "pause", "resume", "complete"])
+        complete = events[-1]
+        self.assertEqual(complete["file"], filename)
+        self.assertEqual(complete["parts"], 2)
+        self.assertEqual(complete["duration"], 300.0)
+        self.assertEqual(history.last_completion(key)["parts"], 2)
+        history.set_goal("day", 4, 0.0)
+        self.assertEqual(history.plan(now=1300.0)["day"]["parts_done"], 2)
+
+    def test_history_ignores_repeated_state(self):
+        server = FakeMoonraker(thumb=b"\x89PNG\r\n\x1a\nx").start()
+        self.addCleanup(server.stop)
+        clock = FakeClock(1000.0)
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        history = HistoryStore(Path(folder) / "farm_history.db", clock=clock)
+        self.addCleanup(history.close)
+        monitor = self.make_monitor(server, clock=clock, history=history)
+        key = monitor._printers[0].key
+        monitor.poll_once()
+        clock.now = 1010.0
+        monitor.poll_once()
+        self.assertEqual(len(history.events(key, 0)), 1)
+
+    def test_history_failure_does_not_break_poll(self):
+        class Broken:
+            def record(self, view, previous=None, now=None):
+                raise RuntimeError("диск недоступен")
+
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server, history=Broken())
+        with self.assertLogs("farm_monitor", level="ERROR"):
+            monitor.poll_once()
+        self.assertEqual(monitor.snapshot()["printers"][0]["state"], "printing")
 
 
 if __name__ == "__main__":
