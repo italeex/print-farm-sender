@@ -9,6 +9,7 @@ from farm_core import APP_DIR
 HISTORY_PATH = APP_DIR / "farm_history.db"
 PERIODS = ("day", "week", "month")
 RETENTION_SECONDS = 180 * 86400
+PRUNE_INTERVAL = 86400
 EVENT_LIMIT = 500
 EVENT_COLUMNS = "id, printer_key, ts, event, state, file, parts, duration, message"
 SCHEMA = """
@@ -32,18 +33,23 @@ CREATE TABLE IF NOT EXISTS goals (
 """
 
 
-def _event_type(previous_state, state, first):
+def _event_type(previous, state, first):
     if state == "offline":
         return "offline"
     if state == "error":
         return "error"
     if not first:
+        previous_state = str(previous.state or "") if previous is not None else ""
         if state == "paused" and previous_state == "printing":
             return "pause"
         if state == "printing" and previous_state == "paused":
             return "resume"
         if state == "idle" and previous_state in ("printing", "paused"):
-            return "complete"
+            try:
+                progress = float(previous.progress)
+            except (TypeError, ValueError):
+                progress = 0.0
+            return "complete" if progress >= 0.99 else "cancelled"
     return "state"
 
 
@@ -99,6 +105,7 @@ class HistoryStore:
         self._clock = clock
         self._lock = threading.RLock()
         self._printing_since: dict[str, float] = {}
+        self._last_prune = 0.0
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -110,7 +117,7 @@ class HistoryStore:
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
             self._conn.commit()
-            self._conn.execute("DELETE FROM events WHERE ts < ?", (self._clock() - RETENTION_SECONDS,))
+            self._prune(self._clock())
             self._conn.commit()
 
     def record(self, view, previous=None, now=None):
@@ -121,18 +128,20 @@ class HistoryStore:
         if previous is not None and str(previous.state or "") == state and str(previous.file or "") == filename:
             return None
         previous_state = str(previous.state or "") if previous is not None else ""
-        kind = _event_type(previous_state, state, previous is None)
+        kind = _event_type(previous, state, previous is None)
         file_value = filename
         parts = None
         message = None
         if kind == "complete":
             file_value = str(previous.file or "") or filename
             parts = _part_count(previous.parts)
+        if kind == "cancelled":
+            file_value = str(previous.file or "") or filename
         if kind == "error":
             message = _error_message(view.error)
         with self._lock:
             duration = None
-            if kind == "complete":
+            if kind in ("complete", "cancelled"):
                 start = self._printing_since.pop(key, None)
                 if start is None:
                     row = self._last_event(key, moment)
@@ -140,14 +149,34 @@ class HistoryStore:
                         start = float(row["ts"])
                 if start is not None:
                     duration = max(0.0, moment - start)
-            if state == "printing" and (previous is None or previous_state != "paused"):
-                self._printing_since[key] = self._printing_start(key, moment)
+            elif kind in ("error", "offline"):
+                self._printing_since.pop(key, None)
+            if state in ("printing", "paused"):
+                stale = (
+                    previous is None
+                    or previous_state not in ("printing", "paused")
+                    or str(previous.file or "") != filename
+                )
+                if stale:
+                    start = None
+                    if previous is None:
+                        row = self._last_event(key, moment)
+                        if (
+                            row is not None
+                            and str(row["state"] or "") in ("printing", "paused")
+                            and str(row["file"] or "") == filename
+                        ):
+                            start = float(row["ts"])
+                    self._printing_since[key] = moment if start is None else start
             cursor = self._conn.execute(
                 "INSERT INTO events (printer_key, ts, event, state, file, parts, duration, message) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (key, moment, kind, state, file_value, parts, duration, message),
             )
             self._conn.commit()
+            if moment - self._last_prune >= PRUNE_INTERVAL:
+                self._prune(moment)
+                self._conn.commit()
             row = self._conn.execute(
                 f"SELECT {EVENT_COLUMNS} FROM events WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
@@ -311,14 +340,13 @@ class HistoryStore:
         sql += " ORDER BY ts DESC, id DESC LIMIT 1"
         return self._conn.execute(sql, params).fetchone()
 
-    def _printing_start(self, key, moment) -> float:
-        start = self._printing_since.get(key)
-        if start is not None:
-            return start
-        row = self._last_event(key, moment)
-        if row is not None and str(row["state"] or "") in ("printing", "paused") and float(row["ts"]) <= moment:
-            return float(row["ts"])
-        return moment
+    def forget(self, key) -> None:
+        with self._lock:
+            self._printing_since.pop(str(key), None)
+
+    def _prune(self, moment: float) -> None:
+        self._last_prune = moment
+        self._conn.execute("DELETE FROM events WHERE ts < ?", (moment - RETENTION_SECONDS,))
 
     @staticmethod
     def _append(result, state, start, end, filename) -> None:

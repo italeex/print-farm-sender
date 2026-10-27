@@ -31,7 +31,7 @@ from farm_core import (
     print_action,
     save_config,
 )
-from farm_history import PERIODS, HistoryStore
+from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
@@ -54,8 +54,9 @@ BROWSE_TIMEOUT = 300.0
 NAME_MAX_LEN = 60
 HISTORY_LIMIT = 500
 HISTORY_MAX_LIMIT = 5000
+HISTORY_SEGMENT_LIMIT = 2000
 DAY_SECONDS = 86400.0
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 CONFIG_LOCK = threading.RLock()
 BROWSE_LOCK = threading.Lock()
 SCAN_LOCK = threading.Lock()
@@ -283,13 +284,13 @@ class FarmApp:
             self.job.cancel()
         except Exception:
             LOGGER.exception("Не удалось отменить задачу")
+        server = self.server
+        if server is not None:
+            server.shutdown()
         try:
             self.history.close()
         except Exception:
             LOGGER.exception("Не удалось закрыть историю")
-        server = self.server
-        if server is not None:
-            server.shutdown()
 
 
 class FarmHandler(BaseHTTPRequestHandler):
@@ -438,22 +439,35 @@ class FarmHandler(BaseHTTPRequestHandler):
 
     def _api_history(self, raw_key: str, query) -> None:
         key = raw_key.strip("/")
-        if not any(printer.key == key for printer in self.app.config.printers):
+        printer = next((item for item in self.app.config.printers if item.key == key), None)
+        if printer is None:
             self._send_error(404, "Принтер не найден")
             return
         now = time.time()
         since = self._query_float(query, "since", now - DAY_SECONDS)
         until = self._query_float(query, "until", 0.0)
+        if not math.isfinite(since) or since < 0 or not math.isfinite(until) or until < 0:
+            self._send_error(400, "since и until должны быть числами не меньше нуля")
+            return
+        since = max(since, now - RETENTION_SECONDS)
         until_value = until if until > 0 else None
         limit = self._query_int(query, "limit")
         if limit <= 0:
             limit = HISTORY_LIMIT
         history = self.app.history
+        segments = history.segments(key, since, until_value)
+        if len(segments) > HISTORY_SEGMENT_LIMIT:
+            segments = segments[-HISTORY_SEGMENT_LIMIT:]
+        state = ""
+        for item in self.app.monitor.snapshot().get("printers", []):
+            if str(item.get("key") or "") == key:
+                state = str(item.get("state") or "")
+                break
         self._send_json(
             {
-                "printer": key,
+                "printer": {"key": key, "name": printer.name, "state": state},
                 "events": history.events(key, since, until_value, min(limit, HISTORY_MAX_LIMIT)),
-                "segments": history.segments(key, since, until_value),
+                "segments": segments,
                 "last_completion": history.last_completion(key),
             }
         )

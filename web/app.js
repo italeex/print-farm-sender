@@ -12,7 +12,7 @@ const COMPACT_KEY = "farm.compact";
 const GROUPED_KEY = "farm.grouped";
 const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
-const EXPECTED_SERVER_VERSION = "2.5.0";
+const EXPECTED_SERVER_VERSION = "2.5.1";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
@@ -178,6 +178,7 @@ let planStatusEl = null;
 let planData = null;
 let planBusy = false;
 let planEdited = false;
+let planLoaded = false;
 const planInputs = {};
 
 function pick(root, selectors) {
@@ -2433,7 +2434,7 @@ function renderTimeline(segments) {
   if (!historyTimelineEl) return;
   historyTimelineEl.textContent = "";
   const bounds = historyBounds(historyRange);
-  let visible = 0;
+  const items = [];
   for (const segment of segments) {
     if (!segment) continue;
     const state = segment.state && STATE_LABELS[segment.state] ? segment.state : "idle";
@@ -2444,17 +2445,34 @@ function renderTimeline(segments) {
     const from = Math.max(bounds.since, start);
     const to = Math.min(bounds.until, end);
     if (to <= from) continue;
-    const node = document.createElement("span");
-    node.className = "timeline-segment " + state;
-    node.style.flexGrow = String(to - from);
-    node.style.flexBasis = "0";
-    const label = STATE_LABELS[state] || state;
-    const file = segment.file ? baseName(segment.file) : "";
-    const title = label + "\n" + clockFinish(from) + " – " + clockFinish(to) + (file ? "\n" + file : "");
-    node.title = title;
-    historyTimelineEl.appendChild(node);
-    visible += 1;
+    items.push({ state: state, from: from, to: to, file: segment.file ? baseName(segment.file) : "" });
   }
+  const spans = [];
+  let cursor = bounds.since;
+  for (const item of items) {
+    if (item.from > cursor) spans.push({ filler: true, from: cursor, to: item.from });
+    spans.push(item);
+    cursor = Math.max(cursor, item.to);
+  }
+  if (items.length && cursor < bounds.until) {
+    spans.push({ filler: true, from: cursor, to: bounds.until });
+  }
+  for (const span of spans) {
+    const node = document.createElement("span");
+    const range = clockFinish(span.from) + " – " + clockFinish(span.to);
+    if (span.filler) {
+      node.className = "timeline-segment filler";
+      node.title = "Нет данных\n" + range;
+    } else {
+      node.className = "timeline-segment " + span.state;
+      const label = STATE_LABELS[span.state] || span.state;
+      node.title = label + "\n" + range + (span.file ? "\n" + span.file : "");
+    }
+    node.style.flexGrow = String(span.to - span.from);
+    node.style.flexBasis = "0";
+    historyTimelineEl.appendChild(node);
+  }
+  const visible = items.length;
   if (!visible) {
     const empty = document.createElement("span");
     empty.className = "timeline-empty";
@@ -2518,7 +2536,8 @@ function renderHistory(data) {
   const events = data && Array.isArray(data.events) ? data.events : [];
   renderTimeline(segments);
   renderHistoryEvents(events);
-  setText(historySummaryEl, "Событий: " + events.length + " · участков: " + segments.length);
+  const shown = Math.min(events.length, HISTORY_EVENT_LIMIT);
+  setText(historySummaryEl, "Событий: " + shown + " · участков: " + segments.length);
 }
 
 async function loadHistory() {
@@ -2620,7 +2639,9 @@ async function loadPlan() {
     const data = await requestJSON("/api/plan", { timeout: 6000 });
     if (!data || typeof data !== "object") return;
     planData = data;
+    planLoaded = true;
     renderPlan();
+    if (planSaveEl && !planBusy) planSaveEl.disabled = false;
   } catch {}
 }
 
@@ -2640,10 +2661,12 @@ function openPlanModal() {
 }
 
 async function savePlan() {
-  if (planBusy) return;
-  const bodies = PLAN_PERIODS.map(function (period) {
+  if (planBusy || !planLoaded || planData === null) return;
+  const bodies = PLAN_PERIODS.filter(function (period) {
+    return planData[period];
+  }).map(function (period) {
     const inputs = planInputs[period] || {};
-    const parts = Number(inputs.parts ? inputs.parts.value : 0);
+    const parts = Math.floor(Number(inputs.parts ? inputs.parts.value : 0));
     const hours = Number(inputs.hours ? inputs.hours.value : 0);
     return {
       period: period,
@@ -2651,6 +2674,10 @@ async function savePlan() {
       hours_target: Number.isFinite(hours) ? Math.max(0, hours) : 0,
     };
   });
+  if (!bodies.length) {
+    setText(planStatusEl, "План не загружен");
+    return;
+  }
   planBusy = true;
   if (planSaveEl) planSaveEl.disabled = true;
   setText(planStatusEl, "Сохранение…");
@@ -2660,7 +2687,7 @@ async function savePlan() {
     })
   );
   planBusy = false;
-  if (planSaveEl) planSaveEl.disabled = false;
+  if (planSaveEl) planSaveEl.disabled = !planLoaded;
   const failed = results.filter(function (result) {
     return result.status === "rejected";
   }).length;
@@ -2889,6 +2916,7 @@ function init() {
   planButtonEl = document.getElementById("plan");
   planBadgeEl = document.getElementById("plan-badge");
   planSaveEl = document.getElementById("plan-save");
+  if (planSaveEl) planSaveEl.disabled = true;
   planStatusEl = document.getElementById("plan-status");
   for (const period of PLAN_PERIODS) {
     planInputs[period] = {

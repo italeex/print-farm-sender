@@ -575,6 +575,20 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(view["ui_kind"], "fluidd")
         self.assertEqual(len(calls), 1)
 
+    def test_set_printers_clears_history_start(self):
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        clock = FakeClock(1000.0)
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        history = HistoryStore(Path(folder) / "farm_history.db", clock=clock)
+        self.addCleanup(history.close)
+        monitor = self.make_monitor(server, clock=clock, history=history)
+        key = monitor._printers[0].key
+        monitor.poll_once()
+        self.assertIn(key, history._printing_since)
+        monitor.set_printers([])
+        self.assertNotIn(key, history._printing_since)
+
     def test_history_records_print_transitions(self):
         server = FakeMoonraker(
             thumb=b"\x89PNG\r\n\x1a\nx",
@@ -593,7 +607,10 @@ class PollerTests(unittest.TestCase):
         server.objects = {"print_stats": {"state": "paused", "filename": filename}}
         monitor.poll_once()
         clock.now = 1200.0
-        server.objects = {"print_stats": {"state": "printing", "filename": filename}}
+        server.objects = {
+            "print_stats": {"state": "printing", "filename": filename},
+            "virtual_sdcard": {"progress": 1.0},
+        }
         monitor.poll_once()
         clock.now = 1300.0
         server.objects = {"print_stats": {"state": "complete", "filename": filename}}

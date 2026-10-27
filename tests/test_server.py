@@ -880,6 +880,7 @@ class ApiTests(unittest.TestCase):
             state="printing",
             file="деталь.gcode",
             parts=[{"name": "Корпус", "count": 35}],
+            progress=1.0,
         )
         idle = replace(printing, state="idle", parts=[])
         self.history.record(printing, None, now - 60)
@@ -892,7 +893,9 @@ class ApiTests(unittest.TestCase):
         response = requests.get(self.history_url("?since=0"), timeout=3)
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["printer"], self.key)
+        self.assertEqual(payload["printer"]["key"], self.key)
+        self.assertEqual(payload["printer"]["name"], "Тест")
+        self.assertEqual(payload["printer"]["state"], self.monitor.view.state)
         self.assertEqual([event["event"] for event in payload["events"]], ["state", "complete"])
         self.assertEqual(payload["last_completion"]["parts"], 35)
         self.assertEqual(payload["segments"][-1]["state"], "idle")
@@ -919,6 +922,12 @@ class ApiTests(unittest.TestCase):
         response = requests.get(self.url("/api/history/10.0.0.1:7125"), timeout=3)
         self.assertEqual(response.status_code, 404)
         self.assertIn("не найден", response.json()["error"])
+
+    def test_history_rejects_bad_bounds(self):
+        for query in ("?since=nan", "?since=inf", "?since=-5", "?until=nan", "?until=-1"):
+            response = requests.get(self.history_url(query), timeout=3)
+            self.assertEqual(response.status_code, 400, query)
+            self.assertIn("since", response.json()["error"])
 
     def test_plan_defaults(self):
         response = requests.get(self.url("/api/plan"), timeout=3)

@@ -13,7 +13,7 @@ KEY = "192.168.7.158:7125"
 BASE = 1_700_000_000.0
 
 
-def make_view(state, file="", parts=None, error=None):
+def make_view(state, file="", parts=None, error=None, progress=1.0):
     return PrinterView(
         key=KEY,
         name="F008 158",
@@ -25,7 +25,7 @@ def make_view(state, file="", parts=None, error=None):
         online=state != "offline",
         state=state,
         file=file,
-        progress=0.0,
+        progress=progress,
         layer=0,
         layer_total=0,
         eta_seconds=None,
@@ -95,6 +95,64 @@ class HistoryStoreTests(unittest.TestCase):
         events = self.history.events(KEY)
         self.assertEqual([event["event"] for event in events], ["state", "state"])
         self.assertEqual(events[-1]["file"], "b.gcode")
+
+    def test_error_resets_print_start(self):
+        printing = make_view("printing", "a.gcode", progress=0.5)
+        self.record(printing, None, BASE)
+        error = make_view("error", "a.gcode", progress=0.5)
+        self.record(error, printing, BASE + 10)
+        resumed = make_view("printing", "a.gcode", progress=1.0)
+        self.record(resumed, error, BASE + 20)
+        idle = make_view("idle", "a.gcode")
+        self.record(idle, resumed, BASE + 30)
+        complete = self.history.last_completion(KEY)
+        self.assertEqual(complete["ts"], BASE + 30)
+        self.assertEqual(complete["duration"], 10.0)
+
+    def test_offline_resets_print_start(self):
+        printing = make_view("printing", "a.gcode", progress=0.5)
+        self.record(printing, None, BASE)
+        offline = make_view("offline")
+        self.record(offline, printing, BASE + 10)
+        resumed = make_view("printing", "a.gcode", progress=1.0)
+        self.record(resumed, offline, BASE + 20)
+        idle = make_view("idle", "a.gcode")
+        self.record(idle, resumed, BASE + 30)
+        self.assertEqual(self.history.last_completion(KEY)["duration"], 10.0)
+
+    def test_file_change_while_printing_resets_start(self):
+        first = make_view("printing", "a.gcode", progress=0.5)
+        self.record(first, None, BASE)
+        second = make_view("printing", "b.gcode", progress=1.0)
+        self.record(second, first, BASE + 10)
+        idle = make_view("idle", "b.gcode")
+        self.record(idle, second, BASE + 20)
+        complete = self.history.last_completion(KEY)
+        self.assertEqual(complete["file"], "b.gcode")
+        self.assertEqual(complete["duration"], 10.0)
+
+    def test_cancelled_is_not_completion(self):
+        printing = make_view("printing", "a.gcode", [{"name": "Корпус", "count": 30}], progress=0.4)
+        self.record(printing, None, BASE)
+        idle = make_view("idle", "a.gcode")
+        self.record(idle, printing, BASE + 300)
+        events = self.history.events(KEY)
+        self.assertEqual([event["event"] for event in events], ["state", "cancelled"])
+        self.assertIsNone(events[-1]["parts"])
+        self.assertEqual(events[-1]["duration"], 300.0)
+        self.assertIsNone(self.history.last_completion(KEY))
+        self.assertEqual(self.history.plan(now=BASE + 300)["day"]["parts_done"], 0)
+        self.assertEqual(self.history.summary(0.0, BASE + 400)["printers"], {})
+
+    def test_cancelled_after_pause(self):
+        printing = make_view("printing", "a.gcode", [{"name": "Корпус", "count": 30}], progress=0.5)
+        self.record(printing, None, BASE)
+        paused = make_view("paused", "a.gcode", progress=0.5)
+        self.record(paused, printing, BASE + 10)
+        idle = make_view("idle", "a.gcode")
+        self.record(idle, paused, BASE + 20)
+        self.assertEqual([event["event"] for event in self.history.events(KEY)], ["state", "pause", "cancelled"])
+        self.assertIsNone(self.history.last_completion(KEY))
 
     def test_error_and_offline_messages(self):
         printing = make_view("printing", "a.gcode")
@@ -184,6 +242,18 @@ class HistoryStoreTests(unittest.TestCase):
         summary = self.history.summary(0.0, BASE + 400)
         self.assertEqual(summary["printers"][KEY]["complete"], 1)
         self.assertEqual(summary["printers"][KEY]["parts"], 35)
+
+    def test_forget_clears_print_start(self):
+        self.record(make_view("printing", "a.gcode"), None, BASE)
+        self.assertIn(KEY, self.history._printing_since)
+        self.history.forget(KEY)
+        self.assertNotIn(KEY, self.history._printing_since)
+
+    def test_retention_pruned_once_per_day(self):
+        self.record(make_view("printing", "a.gcode"), None, BASE)
+        self.clock.now = BASE + 181 * 86400
+        self.record(make_view("idle", "a.gcode"), make_view("printing", "a.gcode"), self.clock.now)
+        self.assertEqual([event["state"] for event in self.history.events(KEY)], ["idle"])
 
     def test_old_events_pruned_on_open(self):
         self.record(make_view("printing", "a.gcode"), None, 1000.0)

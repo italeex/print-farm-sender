@@ -250,6 +250,7 @@ class FarmMonitor:
         printers = list(printers)
         keys = {printer.key for printer in printers}
         with self._lock:
+            removed = {printer.key for printer in self._printers} - keys
             self._printers = printers
             for printer in printers:
                 self._next_due[printer.key] = 0.0
@@ -257,6 +258,12 @@ class FarmMonitor:
                 for key in list(mapping):
                     if key not in keys:
                         del mapping[key]
+        if self._history is not None:
+            for key in removed:
+                try:
+                    self._history.forget(key)
+                except Exception:
+                    LOGGER.exception("Не удалось очистить историю принтера %s", key)
 
     def refresh(self) -> None:
         with self._lock:
