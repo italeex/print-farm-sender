@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 const POLL_IDLE_MS = 2000;
 const POLL_JOB_MS = 1000;
@@ -12,7 +12,7 @@ const COMPACT_KEY = "farm.compact";
 const GROUPED_KEY = "farm.grouped";
 const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
-const EXPECTED_SERVER_VERSION = "2.5.1";
+const EXPECTED_SERVER_VERSION = "2.6.0";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
@@ -3336,3 +3336,4 @@ if (document.readyState === "loading") {
 } else {
   init();
 }
+
