@@ -137,6 +137,13 @@ class BuildViewTests(unittest.TestCase):
         self.assertIsNone(view.eta_seconds)
         self.assertIsNone(view.finish_at)
 
+    def test_parts_passed_through(self):
+        parts = [{"name": "Корпус", "count": 35}]
+        view = build_view(self.printer, info=self.info, status=self.status, now=1, error=None, thumb_version="", parts=parts)
+        self.assertEqual(view.parts, parts)
+        fallback = build_view(self.printer, info=self.info, status=self.status, now=1, error=None, thumb_version="")
+        self.assertEqual(fallback.parts, [])
+
 
 class SummaryTests(unittest.TestCase):
     def test_counts_and_nearest_finish(self):
@@ -328,6 +335,7 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(view["state"], "offline")
         self.assertFalse(view["online"])
         self.assertEqual(view["last_seen"], 0)
+        self.assertEqual(view["parts"], [])
         self.assertEqual(snapshot["summary"]["offline"], 1)
 
     def test_set_printers_purges_state_and_resets_schedule(self):
@@ -464,6 +472,41 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(view["state"], "error")
         self.assertEqual(view["error"]["code"], "2560")
         self.assertEqual(view["error"]["detail"], "MCU lost")
+
+    def test_poll_once_returns_parts(self):
+        names = [f"Корпус.stl_id_{index}_copy_0" for index in range(35)]
+        server = FakeMoonraker(thumb=b"\x89PNG\r\n\x1a\nx", parts=names).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["parts"], [{"name": "Корпус.stl", "count": 35}])
+
+    def test_parts_cached_between_polls(self):
+        server = FakeMoonraker(thumb=b"\x89PNG\r\n\x1a\nx", parts=["Деталь_id_0_copy_0"]).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        key = monitor._printers[0].key
+        monitor.poll_once()
+        self.drain_thumbs(monitor)
+        self.assertEqual(server.request_count("/server/files/gcodes/"), 1)
+        monitor._next_due[key] = 0
+        monitor.poll_once()
+        self.drain_thumbs(monitor)
+        self.assertEqual(server.request_count("/server/files/gcodes/"), 1)
+        self.assertEqual(monitor.snapshot()["printers"][0]["parts"], [{"name": "Деталь", "count": 1}])
+
+    def test_idle_print_has_no_parts(self):
+        server = FakeMoonraker(
+            objects={"print_stats": {"state": "complete", "filename": "part.gcode"}},
+            parts=["Деталь_id_0_copy_0"],
+        ).start()
+        self.addCleanup(server.stop)
+        monitor = self.make_monitor(server)
+        monitor.poll_once()
+        view = monitor.snapshot()["printers"][0]
+        self.assertEqual(view["state"], "idle")
+        self.assertEqual(view["parts"], [])
 
     def test_ui_kind_detected_from_fake_server(self):
         ui = FakeUI("<html><head><title>Fluidd</title></head><body></body></html>").start()

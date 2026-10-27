@@ -244,8 +244,8 @@ function formatEta(status, seconds, finishAt) {
   if (!Number.isFinite(remaining) || remaining <= 0) {
     return finish !== null ? "до " + clockFinish(finish) : "—";
   }
-  if (finish !== null) return formatDuration(remaining) + " · до " + clockFinish(finish);
-  return formatDuration(remaining);
+  if (finish !== null) return "осталось " + formatDuration(remaining) + " · до " + clockFinish(finish);
+  return "осталось " + formatDuration(remaining);
 }
 
 function formatTemp(value) {
@@ -728,6 +728,14 @@ function createCard(view) {
     cancelPrint: field(el, "cancel-print") || el.querySelector('[data-action="cancel-print"]'),
   };
   if (!refs.stateLabel) refs.stateLabel = refs.pill;
+  refs.parts = field(el, "parts");
+  if (!refs.parts && refs.file) {
+    refs.parts = document.createElement("p");
+    refs.parts.className = "fname muted parts";
+    refs.parts.dataset.field = "parts";
+    refs.parts.style.fontSize = "11.5px";
+    refs.file.insertAdjacentElement("afterend", refs.parts);
+  }
   const record = {
     el: el,
     refs: refs,
@@ -770,6 +778,17 @@ function upsertCard(view) {
   if (refs.select) refs.select.checked = selected;
 
   setText(refs.file, view.file || "—");
+  const parts = Array.isArray(view.parts) ? view.parts : [];
+  const partsText = parts
+    .filter(function (part) {
+      return part && part.name;
+    })
+    .map(function (part) {
+      return String(part.name) + " × " + (Number(part.count) || 0);
+    })
+    .join(", ");
+  setText(refs.parts, partsText ? "Детали: " + partsText : "");
+  if (refs.parts) refs.parts.hidden = !partsText;
   const percent = Math.round(clamp(view.progress, 0, 1) * 100);
   if (refs.progressTrack) {
     refs.progressTrack.classList.toggle("paused", status === "paused");
