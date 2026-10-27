@@ -214,7 +214,12 @@ class FarmApp:
         if monitor is not None:
             self.monitor = monitor
         else:
-            self.monitor = FarmMonitor(self.config, thumb_cache=self.thumb_cache, ui_detect=self.ui_detect_func)
+            self.monitor = FarmMonitor(
+                self.config,
+                thumb_cache=self.thumb_cache,
+                ui_detect=self.ui_detect_func,
+                history=self.history,
+            )
         self.job = job if job is not None else JobManager(on_event=self.record_event)
         self.last_heartbeat = time.time()
         if start_monitor:

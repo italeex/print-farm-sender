@@ -60,6 +60,7 @@ class ServerTests(unittest.TestCase):
                 start_monitor=False,
                 history=HistoryStore(Path(folder) / "farm_history.db"),
             )
+            self.assertIs(app.monitor._history, app.history)
             snapshot = app.state_snapshot()
             app.shutdown()
         self.assertEqual(snapshot["version"], APP_VERSION)
