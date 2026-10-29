@@ -397,6 +397,25 @@ body.compact .grid { gap: 10px; }
 .journal-list .ok { color: var(--success); }
 .journal-list:empty::before { content: "Событий пока нет"; color: var(--muted-2); }
 
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+.tabs [data-tab] {
+  appearance: none; border: 1px solid var(--border); background: transparent; color: var(--muted);
+  padding: 9px 16px; border-radius: 11px; font: inherit; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: .16s ease; white-space: nowrap;
+}
+.tabs [data-tab]:hover { background: #181d27; color: var(--text); }
+.tabs [data-tab][aria-selected="true"] { background: #1a2130; border-color: #2d3546; color: var(--text); }
+
+.tab-panel h2 { margin: 22px 0 8px; font-size: 16px; font-weight: 620; }
+.tab-note { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+
+#panel-log .journal-panel {
+  position: static; max-height: none; margin-top: 18px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: none;
+}
+#panel-log .journal-list { max-height: 60vh; }
+
 /* modals */
 .modal {
   position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;

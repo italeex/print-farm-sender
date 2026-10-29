@@ -22,6 +22,7 @@ const STATE_LABELS = {
 };
 const SUMMARY_KEYS = ["printing", "paused", "idle", "error", "offline"];
 const FILTER_KEYS = ["all", "printing", "paused", "idle", "error", "offline"];
+const TABS = ["overview", "files", "plan", "shift", "printers", "log"];
 const GROUP_ORDER = ["printing", "paused", "error", "idle", "offline"];
 const GROUP_LABELS = {
   printing: "Печатают",
@@ -69,6 +70,7 @@ const state = {
   query: "",
   compact: false,
   grouped: false,
+  tab: "overview",
   lastDir: "",
 };
 
@@ -2379,14 +2381,24 @@ async function loadJournal() {
 }
 
 function setJournalOpen(value) {
-  if (!journalPanel) return;
-  const open = typeof value === "boolean" ? value : journalPanel.hidden;
-  journalPanel.hidden = !open;
-  if (journalToggleEl) journalToggleEl.setAttribute("aria-expanded", String(open));
-  if (open) {
-    loadJournal();
-    if (journalEl) journalEl.scrollTop = journalEl.scrollHeight;
+  if (value === undefined) showTab(state.tab === "log" ? "overview" : "log");
+  else showTab(value ? "log" : "overview");
+}
+
+function showTab(name) {
+  const next = TABS.indexOf(name) === -1 ? "overview" : name;
+  for (const el of document.querySelectorAll("[data-tab]")) {
+    el.setAttribute("aria-selected", String(el.dataset.tab === next));
   }
+  for (const el of document.querySelectorAll("[data-panel]")) {
+    el.hidden = el.dataset.panel !== next;
+  }
+  state.tab = next;
+  if (journalPanel) journalPanel.hidden = next !== "log";
+  if (journalToggleEl) journalToggleEl.setAttribute("aria-expanded", String(next === "log"));
+  if (location.hash !== "#/" + next) history.replaceState(null, "", "#/" + next);
+  if (next === "plan" && typeof openPlanTab === "function") openPlanTab();
+  if (next === "log") loadJournal();
 }
 
 function historyBounds(range) {
@@ -3452,9 +3464,9 @@ function handleKeyboard(event) {
       closeCardMenus();
       return;
     }
-    if (journalPanel && !journalPanel.hidden) {
+    if (state.tab === "log") {
       event.preventDefault();
-      setJournalOpen(false);
+      showTab("overview");
     }
     return;
   }
@@ -3476,7 +3488,7 @@ function handleKeyboard(event) {
   }
   if (event.code === "KeyJ" && !event.ctrlKey && !event.metaKey && !event.altKey) {
     event.preventDefault();
-    setJournalOpen(journalPanel ? !journalPanel.hidden : true);
+    showTab(state.tab === "log" ? "overview" : "log");
   }
 }
 
@@ -3558,7 +3570,7 @@ function bindDocument() {
       else closeModal(target);
       return;
     }
-    const emptyAction = target.closest('#cards-empty [data-action="open-printers"]');
+    const emptyAction = target.closest('[data-action="open-printers"]');
     if (emptyAction) {
       openPrintersModal();
       return;
@@ -3821,11 +3833,11 @@ function init() {
 
   if (journalToggleEl) {
     journalToggleEl.addEventListener("click", function () {
-      setJournalOpen(journalPanel ? journalPanel.hidden : true);
+      showTab(state.tab === "log" ? "overview" : "log");
     });
   }
   if (journalCloseEl) journalCloseEl.addEventListener("click", function () {
-    setJournalOpen(false);
+    showTab("overview");
   });
 
   if (planButtonEl) planButtonEl.addEventListener("click", openPlanModal);
@@ -3869,11 +3881,21 @@ function init() {
     finishConfirm(true);
   });
 
+  for (const tab of document.querySelectorAll("[data-tab]")) {
+    tab.addEventListener("click", function () {
+      showTab(tab.dataset.tab || "overview");
+    });
+  }
+  window.addEventListener("hashchange", function () {
+    showTab((location.hash || "").replace("#/", ""));
+  });
+
   document.addEventListener("keydown", handleKeyboard);
 
   restoreCompact();
   restoreGrouped();
   renderFilesStrip();
+  showTab((location.hash || "").replace("#/", ""));
   fetchState();
   loadJournal();
   loadPlan();

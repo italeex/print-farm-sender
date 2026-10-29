@@ -55,6 +55,16 @@
     </button>
   </header>
 
+  <nav class="tabs" role="tablist" aria-label="Разделы дашборда">
+    <button type="button" role="tab" data-tab="overview" aria-selected="true">Обзор</button>
+    <button type="button" role="tab" data-tab="files" aria-selected="false">Файлы</button>
+    <button type="button" role="tab" data-tab="plan" aria-selected="false">План</button>
+    <button type="button" role="tab" data-tab="shift" aria-selected="false">Смена</button>
+    <button type="button" role="tab" data-tab="printers" aria-selected="false">Принтеры</button>
+    <button type="button" role="tab" data-tab="log" aria-selected="false">Журнал</button>
+  </nav>
+
+  <section id="panel-overview" data-panel="overview">
   <section class="summary" id="summary" aria-label="Сводка по ферме">
     <button class="stat printing" type="button" data-stat="printing" data-filter="printing" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>печатают</small></div></button>
     <button class="stat paused" type="button" data-stat="paused" data-filter="paused" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>на паузе</small></div></button>
@@ -116,9 +126,31 @@
   </div>
 
   <noscript><p class="noscript">Для дашборда нужен JavaScript. Сервер работает, но данные не обновляются.</p></noscript>
-</div>
+  </section>
 
-<section class="journal-panel" id="journal-panel" aria-label="Журнал событий" hidden>
+  <section class="tab-panel" id="panel-files" data-panel="files" hidden>
+    <h2>Файлы</h2>
+    <p class="tab-note">Скоро здесь появятся файлы для отправки на принтеры.</p>
+  </section>
+
+  <section class="tab-panel" id="panel-plan" data-panel="plan" hidden>
+    <h2>План</h2>
+    <p class="tab-note">Скоро здесь появится план выпуска.</p>
+  </section>
+
+  <section class="tab-panel" id="panel-shift" data-panel="shift" hidden>
+    <h2>Смена</h2>
+    <p class="tab-note">Скоро здесь появится смена.</p>
+  </section>
+
+  <section class="tab-panel" id="panel-printers" data-panel="printers" hidden>
+    <h2>Принтеры</h2>
+    <p class="tab-note">Список принтеров открывается в отдельном окне.</p>
+    <button class="btn primary" type="button" data-action="open-printers">Открыть список принтеров</button>
+  </section>
+
+  <section id="panel-log" data-panel="log" hidden>
+  <section class="journal-panel" id="journal-panel" aria-label="Журнал событий">
   <header class="journal-head">
     <h2>Журнал</h2>
     <span class="badge" id="journal-count">0</span>
@@ -126,7 +158,9 @@
     <button class="mini" id="journal-close" type="button" aria-label="Закрыть журнал">×</button>
   </header>
   <ol class="journal-list" id="journal" aria-live="polite"></ol>
-</section>
+  </section>
+  </section>
+</div>
 
 <div class="modal" id="modal-files" role="dialog" aria-modal="true" aria-labelledby="modal-files-title" hidden>
   <div class="modal-card wide">
