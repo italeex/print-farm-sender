@@ -543,6 +543,41 @@ class HistoryStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=value):
                 self.history.calendar(value, now=moment)
 
+    def test_calendar_actuals_query_is_bounded(self):
+        printing = make_view("printing", "деталь.gcode", [{"name": "Корпус", "count": 2}])
+        self.record(printing, None, datetime(2024, 3, 4, 10, 0).timestamp())
+        self.record(make_view("idle", "деталь.gcode"), printing, datetime(2024, 3, 4, 10, 1).timestamp())
+        statements = []
+        self.history._conn.set_trace_callback(statements.append)
+        try:
+            data = self.history.calendar("2024-03", now=datetime(2024, 3, 18, 12, 0).timestamp())
+        finally:
+            self.history._conn.set_trace_callback(None)
+        queries = [sql for sql in statements if "FROM events" in sql]
+        self.assertEqual(len(queries), 1)
+        self.assertIn("ts >=", queries[0])
+        self.assertIn("ts <", queries[0])
+        day = next(item for item in data["days"] if item["date"] == "2024-03-04")
+        self.assertEqual(day["actual"], 2)
+
+    def test_events_event_ts_index(self):
+        names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
+        self.assertIn("events_event_ts", names)
+
+    def test_calendar_four_week_month(self):
+        data = self.history.calendar("2027-02", now=datetime(2027, 2, 15, 12, 0).timestamp())
+        self.assertEqual(data["month_start"], "2027-02-01")
+        self.assertEqual(data["month_end"], "2027-02-28")
+        self.assertEqual(len(data["weeks"]), 4)
+        self.assertEqual(data["weeks"][0]["start"], "2027-02-01")
+        self.assertEqual(data["weeks"][-1]["end"], "2027-02-28")
+
+    def test_calendar_month_overflow(self):
+        with self.assertRaises(ValueError) as caught:
+            self.history.calendar("9999-12")
+        self.assertIn("9999-12", str(caught.exception))
+        self.assertNotIn("формате", str(caught.exception))
+
     def test_plan_keeps_goal_for_periods_without_items(self):
         self.history.set_goal("day", 70, 2.0)
         self.history.import_plan(

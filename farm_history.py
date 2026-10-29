@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS events (
     parts_json TEXT
 );
 CREATE INDEX IF NOT EXISTS events_printer_ts ON events (printer_key, ts);
+CREATE INDEX IF NOT EXISTS events_event_ts ON events (event, ts);
 CREATE TABLE IF NOT EXISTS goals (
     period TEXT PRIMARY KEY,
     parts_target INTEGER NOT NULL DEFAULT 0,
@@ -146,6 +147,8 @@ def _month_first(month) -> date:
 
 
 def _next_month(first: date) -> date:
+    if first.year == 9999 and first.month == 12:
+        raise ValueError("Месяц должен быть не позже 9999-12")
     return date(first.year + first.month // 12, first.month % 12 + 1, 1)
 
 
@@ -613,9 +616,16 @@ class HistoryStore:
         return self._day_actuals(_day_of(start), _day_of(end - 1.0))
 
     def _day_actuals(self, first: str, last: str) -> dict[tuple[str, str], int]:
+        try:
+            start = datetime.fromisoformat(first).timestamp()
+            end = (datetime.fromisoformat(last) + timedelta(days=1)).timestamp()
+        except (OSError, OverflowError, ValueError):
+            return {}
         totals: dict[tuple[str, str], int] = {}
         rows = self._conn.execute(
-            "SELECT ts, parts_json FROM events WHERE event = 'complete' AND parts_json IS NOT NULL"
+            "SELECT ts, parts_json FROM events "
+            "WHERE event = 'complete' AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
+            (start, end),
         )
         for row in rows:
             try:

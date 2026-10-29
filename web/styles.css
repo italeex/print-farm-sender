@@ -619,6 +619,8 @@ body.compact .grid { gap: 10px; }
   white-space: nowrap;
 }
 .plan-day.has-plan { background: #121a28; }
+.plan-day.extra { background: rgba(91, 140, 255, .08); }
+.plan-day.extra .plan-day-count { color: #9db8ff; }
 .plan-day.partial { background: rgba(245, 165, 36, .1); }
 .plan-day.partial .plan-day-count { color: #ffc766; }
 .plan-day.done { background: rgba(52, 211, 153, .1); }
@@ -633,6 +635,9 @@ body.compact .grid { gap: 10px; }
 .plan-week-count { font-family: var(--mono); font-size: 11.5px; color: #cfd8e8; white-space: nowrap; }
 .plan-week.partial { border-color: rgba(245, 165, 36, .35); }
 .plan-week.partial .plan-week-count { color: #ffc766; }
+.plan-week.has-plan { border-color: #2a3446; }
+.plan-week.extra { border-color: rgba(91, 140, 255, .3); }
+.plan-week.extra .plan-week-count { color: #9db8ff; }
 .plan-week.done { border-color: rgba(52, 211, 153, .35); }
 .plan-week.done .plan-week-count { color: #6ee7b7; }
 .plan-day.selected, .plan-week.selected {

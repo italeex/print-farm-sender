@@ -204,6 +204,7 @@ let planCalendarMonth = "";
 let planCalendarRequest = 0;
 let planSelection = null;
 const planCalendarCache = new Map();
+const PLAN_CACHE_TTL_MS = 15000;
 let modalPrinting = null;
 let printingButtonEl = null;
 let printingCountEl = null;
@@ -2791,7 +2792,7 @@ function planStatusClass(target, actual) {
   if (plan > 0 && fact >= plan) return "done";
   if (fact > 0 && fact < plan) return "partial";
   if (plan <= 0 && fact <= 0) return "empty";
-  return plan > 0 ? "has-plan" : "";
+  return plan > 0 ? "has-plan" : "extra";
 }
 
 function planDayStatus(entry) {
@@ -2808,11 +2809,50 @@ function planDefaultSelection(key) {
   return { kind: "day", date: key + "-01" };
 }
 
-function planSelectionMonthKey() {
-  if (!planSelection) return "";
-  return planSelection.kind === "week"
-    ? String(planSelection.start || "").slice(0, 7)
-    : String(planSelection.date || "").slice(0, 7);
+function planSelectionInMonth(key) {
+  if (!planSelection) return false;
+  if (planSelection.kind === "week") {
+    const start = planDay(planSelection.start);
+    const month = planMonthDate(key);
+    if (!start || !month) return false;
+    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+    const first = new Date(month.getFullYear(), month.getMonth(), 1);
+    const last = new Date(month.getFullYear(), month.getMonth() + 1, 0);
+    return start <= last && end >= first;
+  }
+  return String(planSelection.date || "").slice(0, 7) === key;
+}
+
+function planCacheGet(key) {
+  const entry = planCalendarCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.at > PLAN_CACHE_TTL_MS) {
+    planCalendarCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function planFocusKey() {
+  const active = document.activeElement;
+  if (!active || !planWeeksEl || !planWeeksEl.contains(active)) return null;
+  const week = active.closest("[data-week-start]");
+  if (week) return { kind: "week", key: week.dataset.weekStart || "" };
+  const day = active.closest("[data-date]");
+  if (day) return { kind: "day", key: day.dataset.date || "" };
+  return null;
+}
+
+function planRestoreFocus(focus) {
+  if (!focus || !focus.key || !planWeeksEl) return;
+  const selector = focus.kind === "week" ? "[data-week-start]" : "[data-date]";
+  for (const node of planWeeksEl.querySelectorAll(selector)) {
+    const key = focus.kind === "week" ? node.dataset.weekStart : node.dataset.date;
+    if (key === focus.key) {
+      node.focus({ preventScroll: true });
+      return;
+    }
+  }
 }
 
 function planCalendarRow(dayButton, entry, date, monthIndex, todayKey) {
@@ -2822,9 +2862,11 @@ function planCalendarRow(dayButton, entry, date, monthIndex, todayKey) {
   dayButton.dataset.date = key;
   if (date.getMonth() !== monthIndex) dayButton.classList.add("other-month");
   if (key === todayKey) dayButton.classList.add("today");
-  if (planSelection && planSelection.kind === "day" && planSelection.date === key) {
-    dayButton.classList.add("selected");
-  }
+  const selected = Boolean(planSelection && planSelection.kind === "day" && planSelection.date === key);
+  if (selected) dayButton.classList.add("selected");
+  dayButton.setAttribute("aria-pressed", selected ? "true" : "false");
+  if (selected) dayButton.setAttribute("aria-current", "date");
+  else dayButton.removeAttribute("aria-current");
   const status = planDayStatus(entry);
   if (status) dayButton.classList.add(status);
   const number = document.createElement("span");
@@ -2849,9 +2891,11 @@ function planWeekButton(startKey, isoWeek) {
   button.type = "button";
   button.className = "plan-week";
   button.dataset.weekStart = startKey;
-  if (planSelection && planSelection.kind === "week" && planSelection.start === startKey) {
-    button.classList.add("selected");
-  }
+  const selected = Boolean(planSelection && planSelection.kind === "week" && planSelection.start === startKey);
+  if (selected) button.classList.add("selected");
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  if (selected) button.setAttribute("aria-current", "true");
+  else button.removeAttribute("aria-current");
   const status = planStatusClass(info ? info.target : 0, info ? info.actual : 0);
   if (status) button.classList.add(status);
   const number = document.createElement("span");
@@ -2864,7 +2908,8 @@ function planWeekButton(startKey, isoWeek) {
   button.appendChild(count);
   const start = planDay(startKey);
   const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
-  const title = "Неделя " + (info ? info.week : isoWeek) + " · " + planLongRange(start, end);
+  const title = "Неделя " + (info ? info.week : isoWeek) + " · " + planLongRange(start, end) +
+    " · план " + formatPlanNumber(info ? info.target : 0) + ", факт " + formatPlanNumber(info ? info.actual : 0);
   button.title = title;
   button.setAttribute("aria-label", title);
   return button;
@@ -2872,33 +2917,62 @@ function planWeekButton(startKey, isoWeek) {
 
 function renderPlanCalendar() {
   if (!planWeeksEl) return;
+  const focus = planFocusKey();
   planWeeksEl.textContent = "";
   setText(planMonthEl, planCalendarMonth ? planMonthTitle(planCalendarMonth) : "—");
   const month = planMonthDate(planCalendarMonth);
   if (!month) return;
   const year = month.getFullYear();
   const monthIndex = month.getMonth();
-  const first = new Date(year, monthIndex, 1);
-  const offset = (first.getDay() + 6) % 7;
-  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-  const rowCount = Math.max(5, Math.ceil((offset + daysInMonth) / 7));
-  const base = new Date(year, monthIndex, 1 - offset);
   const todayKey = planDateKey(new Date());
-  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-    const row = document.createElement("div");
-    row.className = "plan-week-row";
-    for (let column = 0; column < 7; column += 1) {
-      const date = new Date(base.getFullYear(), base.getMonth(), base.getDate() + rowIndex * 7 + column);
-      const entry = planDayEntry(planDateKey(date));
-      const button = document.createElement("button");
-      planCalendarRow(button, entry, date, monthIndex, todayKey);
-      row.appendChild(button);
+  const weeks = planCalendar && Array.isArray(planCalendar.weeks)
+    ? planCalendar.weeks.filter(function (week) {
+        return week && Array.isArray(week.days) && week.days.length === 7;
+      })
+    : [];
+  if (weeks.length) {
+    for (const week of weeks) {
+      const row = document.createElement("div");
+      row.className = "plan-week-row";
+      for (const day of week.days) {
+        const date = planDay(day.date);
+        if (!date) continue;
+        const entry = planDayEntry(day.date) || {
+          target: Number(day.target) || 0,
+          actual: Number(day.actual) || 0,
+          items: [],
+        };
+        const button = document.createElement("button");
+        planCalendarRow(button, entry, date, monthIndex, todayKey);
+        row.appendChild(button);
+      }
+      const start = planDay(week.start) || planDay(week.days[0].date);
+      if (start) row.appendChild(planWeekButton(planDateKey(start), Number(week.week) || planIsoWeek(start).week));
+      planWeeksEl.appendChild(row);
     }
-    const start = new Date(base.getFullYear(), base.getMonth(), base.getDate() + rowIndex * 7);
-    row.appendChild(planWeekButton(planDateKey(start), planIsoWeek(start).week));
-    planWeeksEl.appendChild(row);
+  } else {
+    const first = new Date(year, monthIndex, 1);
+    const offset = (first.getDay() + 6) % 7;
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    const rowCount = Math.ceil((offset + daysInMonth) / 7);
+    const base = new Date(year, monthIndex, 1 - offset);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = document.createElement("div");
+      row.className = "plan-week-row";
+      for (let column = 0; column < 7; column += 1) {
+        const date = new Date(base.getFullYear(), base.getMonth(), base.getDate() + rowIndex * 7 + column);
+        const entry = planDayEntry(planDateKey(date));
+        const button = document.createElement("button");
+        planCalendarRow(button, entry, date, monthIndex, todayKey);
+        row.appendChild(button);
+      }
+      const start = new Date(base.getFullYear(), base.getMonth(), base.getDate() + rowIndex * 7);
+      row.appendChild(planWeekButton(planDateKey(start), planIsoWeek(start).week));
+      planWeeksEl.appendChild(row);
+    }
   }
   renderPlanSelection();
+  planRestoreFocus(focus);
 }
 
 function renderPlanTable(items) {
@@ -2911,7 +2985,7 @@ function renderPlanTable(items) {
     const nameCell = document.createElement("td");
     nameCell.className = "plan-name";
     const name = document.createElement("b");
-    name.textContent = String(item.name || item.code || "—");
+    name.textContent = String(item.name || item.code || item.key || "—");
     nameCell.appendChild(name);
     const code = String(item.code || "");
     if (code && code !== name.textContent) {
@@ -3007,7 +3081,7 @@ async function loadPlan() {
 async function loadPlanMonth(key, force) {
   if (!key) return;
   planCalendarMonth = key;
-  const cached = force ? null : planCalendarCache.get(key);
+  const cached = force ? null : planCacheGet(key);
   if (cached) {
     planCalendar = cached;
     renderPlanCalendar();
@@ -3020,14 +3094,14 @@ async function loadPlanMonth(key, force) {
     const data = await requestJSON("/api/plan/calendar?month=" + encodeURIComponent(key), { timeout: 6000 });
     if (token !== planCalendarRequest) return;
     if (!data || typeof data !== "object") throw new Error("Пустой ответ");
-    planCalendarCache.set(key, data);
+    planCalendarCache.set(key, { data: data, at: Date.now() });
     if (planCalendarMonth !== key) return;
     planCalendar = data;
     renderPlanCalendar();
   } catch (error) {
     if (token !== planCalendarRequest) return;
     if (planCalendarMonth === key) {
-      planCalendar = planCalendarCache.get(key) || null;
+      planCalendar = planCacheGet(key) || null;
       renderPlanCalendar();
     }
     toast(errorText(error, "Не удалось загрузить план месяца."), "error");
@@ -3039,7 +3113,7 @@ async function loadPlanMonth(key, force) {
 function planApplyMonth(key, keepSelection) {
   planCalendarMonth = key;
   if (!keepSelection) planSelection = planDefaultSelection(key);
-  planCalendar = planCalendarCache.get(key) || null;
+  planCalendar = planCacheGet(key) || null;
   renderPlanCalendar();
   loadPlanMonth(key);
 }
@@ -3077,7 +3151,7 @@ function planOpenWeek(startKey) {
 
 async function refreshPlanMonth() {
   const key = planCalendarMonth || planMonthKey(new Date());
-  planCalendarCache.delete(key);
+  planCalendarCache.clear();
   planCalendar = null;
   renderPlanCalendar();
   await loadPlanMonth(key, true);
@@ -3087,10 +3161,10 @@ function openPlanModal() {
   if (!modalPlan) return;
   setText(planStatusEl, "");
   if (!planCalendarMonth) planCalendarMonth = planMonthKey(new Date());
-  if (!planSelection || planSelectionMonthKey() !== planCalendarMonth) {
+  if (!planSelectionInMonth(planCalendarMonth)) {
     planSelection = planDefaultSelection(planCalendarMonth);
   }
-  planCalendar = planCalendarCache.get(planCalendarMonth) || null;
+  planCalendar = planCacheGet(planCalendarMonth) || null;
   renderPlanCalendar();
   openModal(modalPlan);
   loadPlan();

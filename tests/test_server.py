@@ -1142,6 +1142,15 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400, month)
             self.assertIn("формате", response.json()["error"])
 
+    def test_plan_calendar_rejects_month_overflow(self):
+        response = requests.get(
+            self.url("/api/plan/calendar?month=" + quote("9999-12", safe="")), timeout=3
+        )
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertIn("9999-12", error)
+        self.assertNotIn("формате", error)
+
     def test_fs_browse_plan_kind(self):
         plan = Path(self.tmp.name) / "plan.xlsx"
         plan.write_bytes(b"PK")
