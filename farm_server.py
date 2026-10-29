@@ -58,7 +58,7 @@ HISTORY_LIMIT = 500
 HISTORY_MAX_LIMIT = 5000
 HISTORY_SEGMENT_LIMIT = 2000
 DAY_SECONDS = 86400.0
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"
 CONFIG_LOCK = threading.RLock()
 BROWSE_LOCK = threading.Lock()
 SCAN_LOCK = threading.Lock()
@@ -1298,6 +1298,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 
