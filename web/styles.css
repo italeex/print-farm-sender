@@ -711,6 +711,15 @@ body.compact .grid { gap: 10px; }
   background: linear-gradient(90deg, #6b98ff, #7c5cff);
 }
 .plan-empty { margin: 0; padding: 18px 12px; text-align: center; font-size: 12.5px; color: var(--muted-2); }
+.plan-progress { margin-top: 12px; }
+.plan-progress-track {
+  display: flex; height: 8px; border-radius: 999px; overflow: hidden;
+  background: #0c0f15; border: 1px solid var(--border-soft);
+}
+.plan-progress-track .progress-done { display: block; height: 100%; background: var(--success); transition: width .25s ease; }
+.plan-progress-track .progress-live { display: block; height: 100%; background: var(--accent); transition: width .25s ease; }
+.plan-progress-label { margin-top: 6px; font-size: 12px; font-family: var(--mono); color: var(--muted); }
+#plan-selection .plan-progress { margin: 0 0 10px; }
 
 @media (max-width: 760px) {
   .plan-weekdays, .plan-week-row { grid-template-columns: repeat(7, minmax(0, 1fr)) 74px; gap: 3px; }

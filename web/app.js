@@ -205,6 +205,8 @@ let planCalendarMonth = "";
 let planCalendarRequest = 0;
 let planLoadedAt = 0;
 let planSelection = null;
+let overviewProgressEl = null;
+let planProgressEl = null;
 const planCalendarCache = new Map();
 const PLAN_CACHE_TTL_MS = 15000;
 let modalPrinting = null;
@@ -3130,6 +3132,90 @@ function renderPlanSelection() {
     }
   }
   renderPlanTable(items);
+  renderPlanProgress(planProgressEl, planSelectedPeriod());
+}
+
+function renderPlanProgress(container, period) {
+  if (!container) return;
+  let track = container.querySelector(".plan-progress-track");
+  let doneBar = container.querySelector(".progress-done");
+  let liveBar = container.querySelector(".progress-live");
+  let label = container.querySelector(".plan-progress-label");
+  if (!track) {
+    track = document.createElement("div");
+    track.className = "plan-progress-track";
+    doneBar = document.createElement("i");
+    doneBar.className = "progress-done";
+    liveBar = document.createElement("i");
+    liveBar.className = "progress-live";
+    track.appendChild(doneBar);
+    track.appendChild(liveBar);
+    container.appendChild(track);
+  }
+  if (!doneBar) {
+    doneBar = document.createElement("i");
+    doneBar.className = "progress-done";
+    track.appendChild(doneBar);
+  }
+  if (!liveBar) {
+    liveBar = document.createElement("i");
+    liveBar.className = "progress-live";
+    track.appendChild(liveBar);
+  }
+  if (!label) {
+    label = document.createElement("div");
+    label.className = "plan-progress-label";
+    container.appendChild(label);
+  }
+  const rawTarget = period ? (period.parts_target !== undefined ? period.parts_target : period.target) : 0;
+  const rawDone = period ? (period.parts_done !== undefined ? period.parts_done : period.actual) : 0;
+  const rawLive = period
+    ? (period.parts_in_progress !== undefined ? period.parts_in_progress : period.in_progress)
+    : 0;
+  const target = Number(rawTarget) || 0;
+  const done = Math.max(0, Number(rawDone) || 0);
+  const live = Math.max(0, Number(rawLive) || 0);
+  if (!(target > 0)) {
+    track.hidden = true;
+    track.removeAttribute("title");
+    container.removeAttribute("title");
+    label.textContent = "план не задан";
+    return;
+  }
+  track.hidden = false;
+  const accounted = done + live;
+  const donePct = Math.round((done / target) * 100);
+  const livePct = Math.round((live / target) * 100);
+  const doneWidth = Math.min(100, (done / target) * 100);
+  const liveWidth = done >= target ? 0 : Math.min(100 - doneWidth, (live / target) * 100);
+  doneBar.style.width = doneWidth + "%";
+  liveBar.style.width = liveWidth + "%";
+  label.textContent = formatPlanNumber(done) + " + " + formatPlanNumber(live) + " из " +
+    formatPlanNumber(target) + " · " + donePct + "% + " + livePct + "%";
+  const title = "Учтено " + formatPlanNumber(accounted) + " из " + formatPlanNumber(target);
+  track.title = title;
+  container.title = title;
+}
+
+function planSelectedPeriod() {
+  if (planCalendar && planSelection) {
+    if (planSelection.kind === "week") {
+      const info = planWeekInfo(planSelection.start);
+      if (info) {
+        return { parts_target: info.target, parts_done: info.actual, parts_in_progress: info.in_progress };
+      }
+    } else if (planSelection.date) {
+      const entry = planDayEntry(planSelection.date);
+      if (entry) {
+        return { parts_target: entry.target, parts_done: entry.actual, parts_in_progress: entry.parts_in_progress };
+      }
+    }
+  }
+  if (planData) {
+    if (planSelection && planSelection.kind === "week") return planData.week || null;
+    return planData.day || null;
+  }
+  return null;
 }
 
 function renderPlan() {
@@ -3145,6 +3231,8 @@ function renderPlan() {
     planButtonEl.title = label;
     planButtonEl.setAttribute("aria-label", label);
   }
+  renderPlanProgress(overviewProgressEl, planData ? planData.day : null);
+  renderPlanProgress(planProgressEl, planSelectedPeriod());
 }
 
 async function loadPlan() {
@@ -3672,6 +3760,8 @@ function init() {
   planSelectionEl = document.getElementById("plan-selection");
   planSelectionTitleEl = document.getElementById("plan-selection-title");
   planSelectionSummaryEl = document.getElementById("plan-selection-summary");
+  overviewProgressEl = document.getElementById("overview-progress");
+  planProgressEl = document.getElementById("plan-progress");
   modalPrinting = document.getElementById("modal-printing");
   printingButtonEl = document.getElementById("printing");
   printingCountEl = document.getElementById("printing-count");
