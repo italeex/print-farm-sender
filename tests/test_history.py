@@ -712,6 +712,21 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(result["positions"], 1)
         self.assertEqual(result["items"][0]["count"], 5)
 
+    def test_catalog_numbers_are_auto_and_unique(self):
+        self.history.import_plan(
+            [
+                {"date": "2026-10-29", "key": "a", "code": "A", "name": "A", "target": 2},
+                {"date": "2026-10-29", "key": "b", "code": "B", "name": "B", "target": 1},
+            ]
+        )
+        items = self.history.catalog()
+        self.assertEqual(items[0]["number"], 1)
+        self.assertEqual(items[1]["number"], 2)
+        with self.assertRaises(ValueError):
+            self.history.set_catalog("a", number=0)
+        with self.assertRaises(ValueError):
+            self.history.set_catalog("b", number=1)
+
     def test_events_event_ts_index(self):
         names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
         self.assertIn("events_event_ts", names)

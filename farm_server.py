@@ -378,6 +378,9 @@ class FarmHandler(BaseHTTPRequestHandler):
         if path == "/api/qc.csv":
             self._api_qc_csv(query)
             return
+        if path == "/api/catalog":
+            self._send_json({"items": self.app.history.catalog()})
+            return
         if path.startswith("/api/history/"):
             self._api_history(path[len("/api/history/"):], query)
             return
@@ -433,6 +436,9 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/plan":
             self._api_plan()
+            return
+        if path == "/api/catalog":
+            self._api_catalog()
             return
         if path.startswith("/api/print/"):
             self._api_print(path[len("/api/print/"):])
@@ -549,6 +555,27 @@ class FarmHandler(BaseHTTPRequestHandler):
                 return
         self.app.history.set_goal(period, parts_target, hours_target)
         self._send_json(self.app.history.plan(live_parts=self._live_parts()))
+
+    def _api_catalog(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_key = payload.get("part_key")
+        part_key = str(raw_key or "").strip() if isinstance(raw_key, str) else ""
+        if not part_key:
+            self._send_error(400, "Не указан part_key")
+            return
+        number = payload.get("number")
+        file_path = payload.get("file_path")
+        if file_path is not None and not isinstance(file_path, str):
+            self._send_error(400, "Путь к файлу должен быть строкой")
+            return
+        try:
+            item = self.app.history.set_catalog(part_key, number=number, file_path=file_path)
+        except ValueError as exc:
+            self._send_error(400, str(exc) or "Некорректные данные каталога")
+            return
+        self._send_json({"ok": True, "item": item})
 
     def _live_parts(self) -> list[dict]:
         parts: dict[str, dict] = {}

@@ -42,6 +42,17 @@ CREATE TABLE IF NOT EXISTS plan_items (
     target INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (date, part_key)
 );
+CREATE TABLE IF NOT EXISTS parts_catalog (
+    part_key TEXT PRIMARY KEY,
+    number INTEGER,
+    code TEXT,
+    name TEXT,
+    file_path TEXT,
+    file_size INTEGER,
+    file_mtime REAL,
+    updated_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number ON parts_catalog(number) WHERE number IS NOT NULL;
 """
 
 
@@ -438,6 +449,9 @@ class HistoryStore:
                 plan_rows = any(item["target"] > 0 for item in items)
                 in_progress = live if start_date <= today <= end_date else {}
                 items = _with_live(items, in_progress)
+                numbers = self._catalog_numbers_locked()
+                for item in items:
+                    item.setdefault("number", numbers.get(item["key"]))
                 parts_target = sum(item["target"] for item in items)
                 parts_done = sum(item["actual"] for item in items)
                 parts_in_progress = sum(item["in_progress"] for item in items)
@@ -596,24 +610,7 @@ class HistoryStore:
                 "WHERE event = 'complete' AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
                 (start, end),
             ).fetchall()
-            numbers: dict[str, int | None] = {}
-            try:
-                table = self._conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parts_catalog'"
-                ).fetchone()
-            except sqlite3.Error:
-                table = None
-            if table is not None:
-                try:
-                    for catalog in self._conn.execute("SELECT part_key, number FROM parts_catalog"):
-                        try:
-                            numbers[str(catalog["part_key"])] = (
-                                int(catalog["number"]) if catalog["number"] is not None else None
-                            )
-                        except (TypeError, ValueError):
-                            numbers[str(catalog["part_key"])] = None
-                except sqlite3.Error:
-                    pass
+            numbers = self._catalog_numbers_locked()
         entries: dict[str, dict] = {}
         for row in rows:
             try:
@@ -722,6 +719,253 @@ class HistoryStore:
             self._conn.commit()
         return {"period": period, "parts_target": parts, "hours_target": hours}
 
+    def catalog(self) -> list[dict]:
+        with self._lock:
+            self._ensure_catalog_locked()
+            rows = self._conn.execute(
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
+                "FROM parts_catalog "
+                "ORDER BY CASE WHEN number IS NULL THEN 1 ELSE 0 END, number, part_key"
+            ).fetchall()
+        return [self._catalog_row(row) for row in rows]
+
+    def catalog_map(self) -> dict[str, dict]:
+        with self._lock:
+            self._ensure_catalog_locked()
+            rows = self._conn.execute(
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime FROM parts_catalog"
+            ).fetchall()
+        return {str(row["part_key"]): self._catalog_row(row) for row in rows}
+
+    def set_catalog(self, part_key, number=None, file_path=None) -> dict:
+        key = str(part_key or "").strip()
+        if not key:
+            raise ValueError("Не указан part_key")
+        if number is not None:
+            if isinstance(number, bool) or not isinstance(number, int):
+                raise ValueError("Номер должен быть целым числом больше нуля")
+            if number <= 0:
+                raise ValueError("Номер должен быть целым числом больше нуля")
+        file_value = None
+        file_size = None
+        file_mtime = None
+        if file_path is not None:
+            text = str(file_path).strip()
+            if text:
+                target = Path(text)
+                if not target.is_file():
+                    raise ValueError(f"Файл не найден: {target}")
+                try:
+                    stat = target.stat()
+                except OSError:
+                    raise ValueError("Не удалось прочитать файл") from None
+                file_value = str(target)
+                file_size = stat.st_size
+                file_mtime = stat.st_mtime
+        with self._lock:
+            self._ensure_catalog_locked()
+            if number is not None:
+                clash = self._conn.execute(
+                    "SELECT part_key FROM parts_catalog WHERE number = ? AND part_key <> ?",
+                    (number, key),
+                ).fetchone()
+                if clash is not None:
+                    raise ValueError(f"Номер {number} уже занят")
+            row = self._conn.execute(
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
+                "FROM parts_catalog WHERE part_key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                code, name = self._lookup_part_names_locked(key)
+                assigned = number
+                if assigned is None:
+                    assigned = self._next_number_locked()
+                self._conn.execute(
+                    "INSERT INTO parts_catalog (part_key, number, code, name, file_path, file_size, "
+                    "file_mtime, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (key, assigned, code, name, file_value, file_size, file_mtime, self._clock()),
+                )
+            else:
+                assigned = number if number is not None else row["number"]
+                if assigned is not None:
+                    try:
+                        assigned = int(assigned)
+                    except (TypeError, ValueError):
+                        assigned = None
+                if file_path is None:
+                    file_value = row["file_path"]
+                    file_size = row["file_size"]
+                    file_mtime = row["file_mtime"]
+                self._conn.execute(
+                    "UPDATE parts_catalog SET number = ?, file_path = ?, file_size = ?, "
+                    "file_mtime = ?, updated_at = ? WHERE part_key = ?",
+                    (assigned, file_value, file_size, file_mtime, self._clock(), key),
+                )
+            self._conn.commit()
+            fresh = self._conn.execute(
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
+                "FROM parts_catalog WHERE part_key = ?",
+                (key,),
+            ).fetchone()
+        return self._catalog_row(fresh)
+
+    @staticmethod
+    def _catalog_row(row) -> dict:
+        try:
+            number = int(row["number"]) if row["number"] is not None else None
+        except (TypeError, ValueError):
+            number = None
+        try:
+            size = int(row["file_size"]) if row["file_size"] is not None else None
+        except (TypeError, ValueError):
+            size = None
+        try:
+            mtime = float(row["file_mtime"]) if row["file_mtime"] is not None else None
+        except (TypeError, ValueError):
+            mtime = None
+        return {
+            "part_key": str(row["part_key"]),
+            "number": number,
+            "code": str(row["code"] or ""),
+            "name": str(row["name"] or ""),
+            "file_path": str(row["file_path"]) if row["file_path"] else None,
+            "file_size": size,
+            "file_mtime": mtime,
+        }
+
+    def _ensure_catalog_locked(self) -> None:
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS parts_catalog ("
+            "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
+            "file_path TEXT, file_size INTEGER, file_mtime REAL, updated_at REAL)"
+        )
+        catalog_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(parts_catalog)")}
+        for column, kind in (
+            ("number", "INTEGER"),
+            ("code", "TEXT"),
+            ("name", "TEXT"),
+            ("file_path", "TEXT"),
+            ("file_size", "INTEGER"),
+            ("file_mtime", "REAL"),
+            ("updated_at", "REAL"),
+        ):
+            if column not in catalog_columns:
+                self._conn.execute(f"ALTER TABLE parts_catalog ADD COLUMN {column} {kind}")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number "
+            "ON parts_catalog(number) WHERE number IS NOT NULL"
+        )
+        known: dict[str, tuple[str, str]] = {}
+        for row in self._conn.execute("SELECT DISTINCT part_key, code, name FROM plan_items"):
+            key = str(row["part_key"] or "").strip()
+            if key and key not in known:
+                known[key] = (str(row["code"] or ""), str(row["name"] or ""))
+        try:
+            event_rows = self._conn.execute(
+                "SELECT parts_json FROM events WHERE event = 'complete' AND parts_json IS NOT NULL"
+            ).fetchall()
+        except sqlite3.Error:
+            event_rows = []
+        for row in event_rows:
+            try:
+                parts = json.loads(row["parts_json"] or "[]")
+            except ValueError:
+                continue
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                key = part_key(part.get("name") or "")
+                if not key or key in known:
+                    continue
+                code, name = split_code_name(part.get("name") or "")
+                known[key] = (code, name)
+        if not known:
+            return
+        existing = {
+            str(row[0]) for row in self._conn.execute("SELECT part_key FROM parts_catalog")
+        }
+        missing = sorted(key for key in known if key not in existing)
+        if missing:
+            current = self._next_number_locked()
+            moment = self._clock()
+            for key in missing:
+                code, name = known[key]
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO parts_catalog (part_key, number, code, name, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (key, current, code, name, moment),
+                )
+                current += 1
+        for key, (code, name) in known.items():
+            if key not in existing:
+                continue
+            self._conn.execute(
+                "UPDATE parts_catalog SET code = CASE WHEN COALESCE(code, '') = '' THEN ? ELSE code END, "
+                "name = CASE WHEN COALESCE(name, '') = '' THEN ? ELSE name END "
+                "WHERE part_key = ?",
+                (code, name, key),
+            )
+        self._conn.commit()
+
+    def _next_number_locked(self) -> int:
+        try:
+            row = self._conn.execute("SELECT MAX(number) FROM parts_catalog").fetchone()
+        except sqlite3.Error:
+            return 1
+        try:
+            top = int(row[0]) if row is not None and row[0] is not None else 0
+        except (TypeError, ValueError):
+            top = 0
+        return max(top, 0) + 1
+
+    def _lookup_part_names_locked(self, key: str) -> tuple[str, str]:
+        row = self._conn.execute(
+            "SELECT code, name FROM plan_items WHERE part_key = ? LIMIT 1", (key,)
+        ).fetchone()
+        if row is not None:
+            return str(row["code"] or ""), str(row["name"] or "")
+        try:
+            event_rows = self._conn.execute(
+                "SELECT parts_json FROM events WHERE event = 'complete' AND parts_json IS NOT NULL"
+            ).fetchall()
+        except sqlite3.Error:
+            return "", ""
+        for event_row in event_rows:
+            try:
+                parts = json.loads(event_row["parts_json"] or "[]")
+            except ValueError:
+                continue
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if part_key(part.get("name") or "") == key:
+                    return split_code_name(part.get("name") or "")
+        return "", ""
+
+    def _catalog_numbers_locked(self) -> dict[str, int | None]:
+        try:
+            self._ensure_catalog_locked()
+        except sqlite3.Error:
+            return {}
+        try:
+            rows = self._conn.execute("SELECT part_key, number FROM parts_catalog").fetchall()
+        except sqlite3.Error:
+            return {}
+        numbers: dict[str, int | None] = {}
+        for row in rows:
+            try:
+                numbers[str(row["part_key"])] = (
+                    int(row["number"]) if row["number"] is not None else None
+                )
+            except (TypeError, ValueError):
+                numbers[str(row["part_key"])] = None
+        return numbers
+
     def summary(self, since, until=None) -> dict:
         since = float(since)
         end = float(self._clock() if until is None else until)
@@ -788,10 +1032,12 @@ class HistoryStore:
             entry["actual"] += count
             entry["days"].setdefault(day, {"date": day, "target": 0, "actual": 0})["actual"] += count
         items = []
+        numbers = self._catalog_numbers_locked()
         for key in sorted(entries):
             entry = entries[key]
             entry["percent"] = round(entry["actual"] / entry["target"] * 100.0, 1) if entry["target"] > 0 else 0.0
             entry["days"] = [entry["days"][day] for day in sorted(entry["days"])]
+            entry["number"] = numbers.get(key)
             items.append(entry)
         return items
 
@@ -840,6 +1086,27 @@ class HistoryStore:
         columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(events)")}
         if "parts_json" not in columns:
             self._conn.execute("ALTER TABLE events ADD COLUMN parts_json TEXT")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS parts_catalog ("
+            "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
+            "file_path TEXT, file_size INTEGER, file_mtime REAL, updated_at REAL)"
+        )
+        catalog_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(parts_catalog)")}
+        for column, kind in (
+            ("number", "INTEGER"),
+            ("code", "TEXT"),
+            ("name", "TEXT"),
+            ("file_path", "TEXT"),
+            ("file_size", "INTEGER"),
+            ("file_mtime", "REAL"),
+            ("updated_at", "REAL"),
+        ):
+            if column not in catalog_columns:
+                self._conn.execute(f"ALTER TABLE parts_catalog ADD COLUMN {column} {kind}")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number "
+            "ON parts_catalog(number) WHERE number IS NOT NULL"
+        )
 
     def _last_event(self, key, until=None) -> sqlite3.Row | None:
         sql = f"SELECT {EVENT_COLUMNS} FROM events WHERE printer_key = ?"

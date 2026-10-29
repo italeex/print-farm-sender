@@ -3061,6 +3061,13 @@ function renderPlanTable(items) {
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
     nameCell.className = "plan-name";
+    const number = item ? item.number : null;
+    if (number !== null && number !== undefined && String(number).trim() !== "") {
+      const badge = document.createElement("span");
+      badge.className = "plan-number";
+      badge.textContent = "Номер " + String(number).trim();
+      nameCell.appendChild(badge);
+    }
     const name = document.createElement("b");
     name.textContent = String(item.name || item.code || item.key || "—");
     nameCell.appendChild(name);
