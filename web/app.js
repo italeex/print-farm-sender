@@ -12,7 +12,7 @@ const COMPACT_KEY = "farm.compact";
 const GROUPED_KEY = "farm.grouped";
 const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
-const EXPECTED_SERVER_VERSION = "2.9.0";
+const EXPECTED_SERVER_VERSION = "2.10.0";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
