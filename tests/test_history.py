@@ -698,6 +698,20 @@ class HistoryStoreTests(unittest.TestCase):
         day = next(item for item in data["days"] if item["date"] == "2024-03-04")
         self.assertEqual(day["actual"], 2)
 
+    def test_qc_groups_shift_completions(self):
+        def complete(name, count, moment):
+            printing = make_view("printing", "a.gcode", [{"name": name, "count": count}])
+            self.record(printing, None, moment)
+            self.record(make_view("idle", "a.gcode"), printing, moment + 60)
+
+        complete("МВСЛ.ГР3.01.42000.01 Крышка", 3, datetime(2026, 10, 28, 10, 0).timestamp())
+        complete("МФСЛ.ГР3.01.42000.01_Крышка.stl", 2, datetime(2026, 10, 29, 8, 30).timestamp())
+        complete("МВСЛ.ГР3.01.42000.01 Крышка", 9, datetime(2026, 10, 29, 9, 30).timestamp())
+        result = self.history.qc("2026-10-29")
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["positions"], 1)
+        self.assertEqual(result["items"][0]["count"], 5)
+
     def test_events_event_ts_index(self):
         names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
         self.assertIn("events_event_ts", names)

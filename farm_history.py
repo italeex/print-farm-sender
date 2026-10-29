@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from farm_core import APP_DIR
-from farm_plan import part_key
+from farm_plan import part_key, split_code_name
 
 HISTORY_PATH = APP_DIR / "farm_history.db"
 PERIODS = ("day", "week", "month")
@@ -560,6 +560,88 @@ class HistoryStore:
             "today": today,
             "days": days,
             "weeks": weeks,
+        }
+
+    def qc(self, day: str, start_hour: int = 9) -> dict:
+        try:
+            target = date.fromisoformat(str(day or "").strip()[:10])
+        except ValueError:
+            raise ValueError("Дата должна быть в формате ГГГГ-ММ-ДД") from None
+        try:
+            hour = int(start_hour)
+        except (TypeError, ValueError):
+            raise ValueError("Час начала смены должен быть числом от 0 до 23") from None
+        if hour < 0 or hour > 23:
+            raise ValueError("Час начала смены должен быть числом от 0 до 23")
+        start = _local_ts(datetime(target.year, target.month, target.day, hour) - timedelta(days=1))
+        end = _local_ts(datetime(target.year, target.month, target.day, hour))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT parts_json FROM events "
+                "WHERE event = 'complete' AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
+                (start, end),
+            ).fetchall()
+            numbers: dict[str, int | None] = {}
+            try:
+                table = self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parts_catalog'"
+                ).fetchone()
+            except sqlite3.Error:
+                table = None
+            if table is not None:
+                try:
+                    for catalog in self._conn.execute("SELECT part_key, number FROM parts_catalog"):
+                        try:
+                            numbers[str(catalog["part_key"])] = (
+                                int(catalog["number"]) if catalog["number"] is not None else None
+                            )
+                        except (TypeError, ValueError):
+                            numbers[str(catalog["part_key"])] = None
+                except sqlite3.Error:
+                    pass
+        entries: dict[str, dict] = {}
+        for row in rows:
+            try:
+                parts = json.loads(row["parts_json"] or "[]")
+            except ValueError:
+                continue
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                key = part_key(part.get("name") or "")
+                if not key:
+                    continue
+                try:
+                    count = int(part.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if count <= 0:
+                    continue
+                entry = entries.get(key)
+                if entry is None:
+                    code, name = split_code_name(part.get("name") or "")
+                    entry = entries[key] = {"code": code, "name": name, "count": 0}
+                entry["count"] += count
+        items = [
+            {
+                "part_key": key,
+                "number": numbers.get(key),
+                "code": entry["code"],
+                "name": entry["name"],
+                "count": entry["count"],
+            }
+            for key, entry in entries.items()
+        ]
+        items.sort(key=lambda item: (item["number"] is None, item["number"] if item["number"] is not None else 0, item["name"]))
+        return {
+            "date": target.isoformat(),
+            "start": start,
+            "end": end,
+            "items": items,
+            "positions": len(items),
+            "total": sum(item["count"] for item in items),
         }
 
     def import_plan(self, items, start=None, end=None) -> dict:
