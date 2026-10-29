@@ -1025,5 +1025,79 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(self.history.printer_mode("k1:7125"), "folder")
 
 
+class ScheduleStorageTests(unittest.TestCase):
+    def setUp(self):
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        self.path = Path(folder) / "farm_history.db"
+        self.clock = Clock()
+        self.history = HistoryStore(self.path, clock=self.clock)
+        self.addCleanup(self.history.close)
+
+    def test_part_durations_grouped_by_part(self):
+        printing = make_view(
+            "printing", "a.gcode", [{"name": "МВСЛ.A Деталь", "count": 2}, {"name": "B", "count": 1}]
+        )
+        self.history.record(printing, None, BASE)
+        self.history.record(make_view("idle", "a.gcode"), printing, BASE + 120)
+        other = make_view("printing", "b.gcode", [{"name": "МВСЛ.A Деталь", "count": 1}])
+        self.history.record(other, make_view("idle", "b.gcode"), BASE + 200)
+        self.history.record(make_view("idle", "b.gcode"), other, BASE + 260)
+        self.assertEqual(self.history.part_durations(), {"A": [120.0, 60.0], "B": [120.0]})
+
+    def test_part_durations_skips_cancelled_and_missing(self):
+        printing = make_view("printing", "a.gcode", [{"name": "A", "count": 1}], progress=0.4)
+        self.history.record(printing, None, BASE)
+        self.history.record(make_view("idle", "a.gcode"), printing, BASE + 30)
+        self.assertEqual(self.history.part_durations(), {})
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, duration, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'a.gcode', 1, NULL, ?)",
+            (KEY, BASE, json.dumps([{"name": "A", "count": 1}])),
+        )
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, duration, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'a.gcode', 1, 45.0, 'not-json{')",
+            (KEY, BASE + 10),
+        )
+        self.history._conn.commit()
+        self.assertEqual(self.history.part_durations(), {})
+
+    def test_save_schedule_replaces_day(self):
+        tasks = [
+            {"printer_key": "p1", "part_key": "A", "number": 1, "start": 100.0, "finish": 200.0},
+            {"printer_key": "p1", "part_key": "B", "number": 2, "start": 200.0, "finish": 300.0, "manual": 1},
+        ]
+        result = self.history.save_schedule("2026-10-29", tasks)
+        self.assertEqual(result, {"date": "2026-10-29", "saved": 2})
+        rows = self.history.schedule("2026-10-29")
+        self.assertEqual([row["part_key"] for row in rows], ["A", "B"])
+        self.assertEqual(rows[0]["file_name"], "N1.gcode")
+        self.assertEqual(rows[0]["planned_start"], 100.0)
+        self.assertEqual(rows[0]["state"], "planned")
+        self.assertEqual(rows[0]["manual"], 0)
+        self.assertEqual(rows[1]["manual"], 1)
+        again = self.history.save_schedule("2026-10-29", [tasks[0]])
+        self.assertEqual(again, {"date": "2026-10-29", "saved": 1})
+        self.assertEqual(len(self.history.schedule("2026-10-29")), 1)
+        self.assertEqual(self.history.schedule("2026-10-30"), [])
+
+    def test_save_schedule_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            self.history.save_schedule("март", [])
+        with self.assertRaises(ValueError):
+            self.history.save_schedule("2026-10-29", "нет")
+        with self.assertRaises(ValueError):
+            self.history.save_schedule(
+                "2026-10-29", [{"printer_key": "", "part_key": "A", "start": 1.0, "finish": 2.0}]
+            )
+        with self.assertRaises(ValueError):
+            self.history.save_schedule(
+                "2026-10-29", [{"printer_key": "p1", "part_key": "A", "start": 2.0, "finish": 1.0}]
+            )
+        with self.assertRaises(ValueError):
+            self.history.schedule("март")
+        self.assertEqual(self.history.schedule("2026-10-29"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

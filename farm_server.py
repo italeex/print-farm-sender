@@ -48,6 +48,7 @@ from farm_files import (
     upload_to_farm,
 )
 from farm_plan import PLAN_SUFFIXES, parse_plan_file, part_key, split_code_name
+from farm_schedule import build_schedule, estimate_seconds
 from farm_thumbs import ThumbCache, thumbnail_from_file
 
 LOGGER = logging.getLogger(__name__)
@@ -385,6 +386,9 @@ class FarmHandler(BaseHTTPRequestHandler):
         if path == "/api/qc":
             self._api_qc(query)
             return
+        if path == "/api/schedule":
+            self._api_schedule(query)
+            return
         if path == "/api/qc.csv":
             self._api_qc_csv(query)
             return
@@ -449,6 +453,9 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/catalog":
             self._api_catalog()
+            return
+        if path == "/api/schedule/apply":
+            self._api_schedule_apply()
             return
         if path == "/api/files/sync":
             self._api_files_sync()
@@ -946,6 +953,150 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._send_error(400, "Неверная дата")
             return None
         return day
+
+    def _api_schedule(self, query) -> None:
+        raw = self._query_text(query, "date")
+        day = _iso_day(raw) if raw else date.today().isoformat()
+        if not day:
+            self._send_error(400, "Неверная дата")
+            return
+        now = time.time()
+        plan = self.app.history.plan(now, live_parts=self._live_parts())
+        catalog = self.app.history.catalog_map()
+        durations = self.app.history.part_durations()
+        included: set[str] = set()
+        items = []
+        scopes = [
+            (plan.get("day", {}) or {}).get("items") or [],
+            (plan.get("week", {}) or {}).get("items") or [],
+        ]
+        for scope in scopes:
+            for entry in scope:
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get("key") or "")
+                if not key or key in included:
+                    continue
+                try:
+                    remaining = max(
+                        0,
+                        int(entry.get("target") or 0)
+                        - int(entry.get("actual") or 0)
+                        - int(entry.get("in_progress") or 0),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if remaining <= 0:
+                    continue
+                item = catalog.get(key)
+                ref = item.get("file_path") if isinstance(item, dict) else None
+                try:
+                    has_ref = bool(ref) and os.path.isfile(ref)
+                except (OSError, TypeError, ValueError):
+                    has_ref = False
+                if not has_ref:
+                    continue
+                name = str(entry.get("name") or entry.get("code") or key)
+                number = entry.get("number")
+                try:
+                    number = int(number) if number is not None else None
+                except (TypeError, ValueError):
+                    number = None
+                items.append({"part_key": key, "number": number, "name": name, "remaining": remaining})
+                included.add(key)
+        views = self.app.monitor.snapshot().get("printers") or []
+        printers = []
+        current: dict[str, str] = {}
+        for view in views:
+            if not isinstance(view, dict) or not view.get("key"):
+                continue
+            pkey = str(view.get("key"))
+            try:
+                finish = view.get("finish_at")
+                finish_value = None if finish is None else float(finish)
+            except (TypeError, ValueError):
+                finish_value = None
+            printers.append(
+                {
+                    "key": pkey,
+                    "name": str(view.get("name") or ""),
+                    "state": str(view.get("state") or ""),
+                    "finish_at": finish_value,
+                }
+            )
+            current[pkey] = str(view.get("file") or "")
+        stored = self.app.history.registry()
+        ready: dict[str, set[str]] = {}
+        for printer in printers:
+            pkey = printer["key"]
+            files = stored.get(pkey, {})
+            bag: set[str] = set()
+            for part_key, item in catalog.items():
+                number = item.get("number") if isinstance(item, dict) else None
+                if number is None:
+                    continue
+                try:
+                    remote = f"N{int(number)}.gcode"
+                except (TypeError, ValueError):
+                    continue
+                if self._is_printing_remote(current.get(pkey, ""), remote):
+                    bag.add(part_key)
+                    continue
+                entry = files.get(remote)
+                if entry is None:
+                    continue
+                ref_size = item.get("file_size") if isinstance(item, dict) else None
+                try:
+                    ref_size = int(ref_size) if ref_size is not None else None
+                except (TypeError, ValueError):
+                    ref_size = None
+                try:
+                    actual = int((entry or {}).get("size") or 0)
+                except (TypeError, ValueError):
+                    actual = 0
+                if ref_size is not None and actual != ref_size:
+                    continue
+                bag.add(part_key)
+            ready[pkey] = bag
+        estimates = {}
+        for item in items:
+            value, _ = estimate_seconds(durations.get(item["part_key"]) or [])
+            estimates[item["part_key"]] = value
+        self._send_json(build_schedule(now, day, items, printers, ready, estimates))
+
+    def _api_schedule_apply(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw_date = payload.get("date")
+        day = _iso_day(raw_date) if isinstance(raw_date, str) else ""
+        if not day:
+            self._send_error(400, "Неверная дата")
+            return
+        tasks = payload.get("tasks")
+        if not isinstance(tasks, list):
+            self._send_error(400, "Ожидался список tasks")
+            return
+        catalog = self.app.history.catalog_map()
+        known = {printer.key for printer in self.app.config.printers}
+        for task in tasks:
+            if not isinstance(task, dict):
+                self._send_error(400, "Некорректная задача")
+                return
+            part = str(task.get("part_key") or "")
+            if part not in catalog:
+                self._send_error(400, f"Неизвестная деталь: {part or 'пусто'}")
+                return
+            printer = str(task.get("printer_key") or "")
+            if printer not in known:
+                self._send_error(400, f"Принтер не найден: {printer or 'пусто'}")
+                return
+        try:
+            result = self.app.history.save_schedule(day, tasks)
+        except ValueError as exc:
+            self._send_error(400, str(exc) or "Некорректные задачи")
+            return
+        self._send_json({"saved": result["saved"]})
 
     def _api_fs(self, query) -> None:
         raw = self._query_text(query, "path")

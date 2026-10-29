@@ -1,4 +1,5 @@
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -70,6 +71,19 @@ CREATE TABLE IF NOT EXISTS printer_files (
     mode TEXT NOT NULL DEFAULT 'folder',
     checked_at REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS schedule_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    printer_key TEXT NOT NULL,
+    part_key TEXT NOT NULL,
+    number INTEGER,
+    file_name TEXT,
+    planned_start REAL,
+    state TEXT NOT NULL DEFAULT 'planned',
+    manual INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedule_tasks_date ON schedule_tasks (date);
 """
 
 
@@ -1201,6 +1215,112 @@ class HistoryStore:
             result[str(row["printer_key"])] = stamp
         return result
 
+    def part_durations(self) -> dict[str, list[float]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT duration, parts_json FROM events "
+                "WHERE event = 'complete' AND parts_json IS NOT NULL AND duration IS NOT NULL "
+                "ORDER BY ts ASC, id ASC"
+            ).fetchall()
+        result: dict[str, list[float]] = {}
+        for row in rows:
+            try:
+                length = float(row["duration"])
+            except (TypeError, ValueError):
+                continue
+            try:
+                parts = json.loads(row["parts_json"] or "[]")
+            except ValueError:
+                continue
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                key = part_key(part.get("name") or "")
+                if key:
+                    result.setdefault(key, []).append(length)
+        return result
+
+    def save_schedule(self, day, tasks) -> dict:
+        text = _iso_day(day)
+        if not text:
+            raise ValueError("Неверная дата")
+        if not isinstance(tasks, list):
+            raise ValueError("Ожидался список tasks")
+        moment = float(self._clock())
+        rows = [self._schedule_row(text, task, moment) for task in tasks]
+        with self._lock:
+            self._ensure_schedule_schema_locked()
+            self._conn.execute("DELETE FROM schedule_tasks WHERE date = ?", (text,))
+            self._conn.executemany(
+                "INSERT INTO schedule_tasks (date, printer_key, part_key, number, file_name, "
+                "planned_start, state, manual, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self._conn.commit()
+        return {"date": text, "saved": len(rows)}
+
+    def schedule(self, day) -> list[dict]:
+        text = _iso_day(day)
+        if not text:
+            raise ValueError("Неверная дата")
+        with self._lock:
+            self._ensure_schedule_schema_locked()
+            rows = self._conn.execute(
+                "SELECT id, date, printer_key, part_key, number, file_name, planned_start, "
+                "state, manual, created_at FROM schedule_tasks WHERE date = ? ORDER BY id",
+                (text,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _schedule_row(day: str, task, moment: float) -> tuple:
+        if not isinstance(task, dict):
+            raise ValueError("Некорректная задача")
+        printer = str(task.get("printer_key") or "").strip()
+        if not printer:
+            raise ValueError("Не указан принтер задачи")
+        part = str(task.get("part_key") or "").strip()
+        if not part:
+            raise ValueError("Не указана деталь задачи")
+        number = task.get("number")
+        if number is not None and (isinstance(number, bool) or not isinstance(number, int)):
+            raise ValueError("Номер должен быть целым числом")
+        try:
+            start_value = float(task.get("start"))
+            finish_value = float(task.get("finish"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное время задачи") from None
+        if (
+            not math.isfinite(start_value)
+            or not math.isfinite(finish_value)
+            or finish_value <= start_value
+        ):
+            raise ValueError("Некорректное время задачи")
+        file_name = task.get("file_name")
+        if file_name is not None:
+            file_name = str(file_name).strip() or None
+        if file_name is None and number is not None:
+            file_name = f"N{int(number)}.gcode"
+        state = str(task.get("state") or "planned").strip() or "planned"
+        if state not in ("planned", "printing", "done"):
+            state = "planned"
+        manual = 1 if task.get("manual") else 0
+        return (day, printer, part, number, file_name, start_value, state, manual, moment)
+
+    def _ensure_schedule_schema_locked(self) -> None:
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS schedule_tasks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, printer_key TEXT NOT NULL, "
+            "part_key TEXT NOT NULL, number INTEGER, file_name TEXT, planned_start REAL, "
+            "state TEXT NOT NULL DEFAULT 'planned', manual INTEGER NOT NULL DEFAULT 0, "
+            "created_at REAL NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS schedule_tasks_date ON schedule_tasks (date)"
+        )
+
     def _ensure_files_schema_locked(self) -> None:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS file_registry ("
@@ -1365,6 +1485,16 @@ class HistoryStore:
             "CREATE TABLE IF NOT EXISTS printer_files ("
             "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "
             "checked_at REAL NOT NULL DEFAULT 0)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS schedule_tasks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, printer_key TEXT NOT NULL, "
+            "part_key TEXT NOT NULL, number INTEGER, file_name TEXT, planned_start REAL, "
+            "state TEXT NOT NULL DEFAULT 'planned', manual INTEGER NOT NULL DEFAULT 0, "
+            "created_at REAL NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS schedule_tasks_date ON schedule_tasks (date)"
         )
 
     def _last_event(self, key, until=None) -> sqlite3.Row | None:

@@ -7,7 +7,7 @@ import time
 import unittest
 from calendar import monthrange
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
@@ -1769,6 +1769,194 @@ class FileApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("parts", response.json()["error"])
+
+
+class ScheduleApiTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.history = HistoryStore(Path(self.tmp.name) / "farm_history.db")
+        self.addCleanup(self.history.close)
+        self.key = "127.0.0.1:7125"
+        self.config_path = Path(self.tmp.name) / "printers.json"
+        self.config_path.write_text(
+            json.dumps(
+                {"printers": [{"name": "Тест", "host": "127.0.0.1", "port": 7125, "mainsail_port": 4408}]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.view = PrinterView(
+            key=self.key,
+            name="Тест",
+            host="127.0.0.1",
+            port=7125,
+            mainsail_url="http://127.0.0.1:4408",
+            mainsail_port=4408,
+            ui_kind="mainsail",
+            online=True,
+            state="idle",
+            file="",
+            progress=0.0,
+            layer=0,
+            layer_total=0,
+            eta_seconds=None,
+            finish_at=None,
+            nozzle=0.0,
+            bed=0.0,
+            filament="",
+            thumb_version="",
+            error=None,
+            last_seen=0.0,
+        )
+        self.monitor = StubMonitor(self.view)
+        self.app = FarmApp(
+            config_path=self.config_path,
+            monitor=self.monitor,
+            start_monitor=False,
+            history=self.history,
+        )
+        self.addCleanup(self.app.job.cancel)
+        self.server = create_server(self.app, port=0)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def import_day(self, day, key, target):
+        self.history.import_plan([{"date": day, "key": key, "code": key, "name": key, "target": target}])
+
+    def add_reference(self, key):
+        path = Path(self.tmp.name) / f"ref_{key}.gcode"
+        path.write_bytes(b"G1 X0\n")
+        self.history.set_catalog(key, file_path=str(path))
+
+    def add_duration(self, key, seconds):
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, duration, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'a.gcode', 1, ?, ?)",
+            (self.key, 1_000_000.0, float(seconds), json.dumps([{"name": key, "count": 1}])),
+        )
+        self.history._conn.commit()
+
+    def test_get_prioritizes_day_over_week(self):
+        today = date.today()
+        other = (today - timedelta(days=today.weekday())) + timedelta(days=(today.weekday() + 1) % 7)
+        self.import_day(today.isoformat(), "A", 3)
+        self.import_day(other.isoformat(), "B", 2)
+        self.add_reference("A")
+        self.add_reference("B")
+        self.add_duration("A", 60)
+        self.add_duration("B", 60)
+        sked = (today + timedelta(days=1)).isoformat()
+        response = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["date"], sked)
+        self.assertEqual(payload["window"], {"start": "09:00", "end": "18:00"})
+        self.assertFalse(payload["closed"])
+        self.assertEqual([task["part_key"] for task in payload["tasks"]], ["A", "A", "A", "B", "B"])
+        self.assertEqual(payload["unscheduled"], [])
+        self.assertEqual(payload["totals"], {"positions": 2, "copies": 5, "scheduled": 5, "unscheduled": 0})
+        self.assertTrue(all(task["file_ready"] is False for task in payload["tasks"]))
+
+    def test_get_excludes_part_without_reference(self):
+        today = date.today().isoformat()
+        self.history.import_plan(
+            [
+                {"date": today, "key": "A", "code": "A", "name": "A", "target": 2},
+                {"date": today, "key": "C", "code": "C", "name": "C", "target": 2},
+            ]
+        )
+        self.add_reference("A")
+        self.add_duration("A", 60)
+        self.add_duration("C", 60)
+        response = requests.get(self.url("/api/schedule?date=" + quote(today)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        keys = [task["part_key"] for task in payload["tasks"]]
+        keys += [item["part_key"] for item in payload["unscheduled"]]
+        self.assertIn("A", keys)
+        self.assertNotIn("C", keys)
+        self.assertEqual(payload["totals"]["positions"], 1)
+
+    def test_get_does_not_write(self):
+        today = date.today()
+        self.import_day(today.isoformat(), "A", 1)
+        self.add_reference("A")
+        self.add_duration("A", 60)
+        sked = (today + timedelta(days=1)).isoformat()
+        first = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(first.status_code, 200)
+        second = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(self.history.schedule(sked), [])
+        self.assertEqual(
+            self.history._conn.execute("SELECT COUNT(*) FROM schedule_tasks").fetchone()[0], 0
+        )
+
+    def test_get_empty_plan(self):
+        sked = (date.today() + timedelta(days=1)).isoformat()
+        response = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["tasks"], [])
+        self.assertEqual(payload["unscheduled"], [])
+        self.assertEqual(payload["totals"], {"positions": 0, "copies": 0, "scheduled": 0, "unscheduled": 0})
+
+    def test_get_default_date_and_bad_date(self):
+        response = requests.get(self.url("/api/schedule"), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["date"], date.today().isoformat())
+        for bad in ("март", "2026-13-01", "2026-02-30"):
+            denied = requests.get(self.url("/api/schedule?date=" + quote(bad)), timeout=5)
+            self.assertEqual(denied.status_code, 400, bad)
+            self.assertIn("Неверная дата", denied.json()["error"])
+
+    def test_apply_saves_and_replaces(self):
+        self.add_reference("A")
+        self.add_reference("B")
+        day = (date.today() + timedelta(days=1)).isoformat()
+        tasks = [
+            {"printer_key": self.key, "printer": "Тест", "part_key": "A", "number": 1,
+             "name": "A", "start": 100.0, "finish": 200.0, "file_ready": False},
+            {"printer_key": self.key, "printer": "Тест", "part_key": "B", "number": 2,
+             "name": "B", "start": 200.0, "finish": 300.0, "file_ready": True},
+        ]
+        response = requests.post(self.url("/api/schedule/apply"), json={"date": day, "tasks": tasks}, timeout=5)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"saved": 2})
+        rows = self.history.schedule(day)
+        self.assertEqual([row["part_key"] for row in rows], ["A", "B"])
+        self.assertEqual(rows[0]["planned_start"], 100.0)
+        self.assertEqual(rows[0]["file_name"], "N1.gcode")
+        again = requests.post(self.url("/api/schedule/apply"), json={"date": day, "tasks": tasks[:1]}, timeout=5)
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.json(), {"saved": 1})
+        self.assertEqual(len(self.history.schedule(day)), 1)
+
+    def test_apply_rejects_bad_input(self):
+        self.add_reference("A")
+        day = (date.today() + timedelta(days=1)).isoformat()
+        good = {"printer_key": self.key, "part_key": "A", "number": 1, "start": 100.0, "finish": 200.0}
+        cases = [
+            ({"date": "март", "tasks": []}, "Неверная дата"),
+            ({"date": day}, "tasks"),
+            ({"date": day, "tasks": "нет"}, "tasks"),
+            ({"date": day, "tasks": [dict(good, part_key="ZZZ")]}, "Неизвестная деталь"),
+            ({"date": day, "tasks": [dict(good, printer_key="10.0.0.1:7125")]}, "Принтер не найден"),
+            ({"date": day, "tasks": [dict(good, start=300.0, finish=200.0)]}, "время"),
+        ]
+        for body, hint in cases:
+            response = requests.post(self.url("/api/schedule/apply"), json=body, timeout=5)
+            self.assertEqual(response.status_code, 400, body)
+            self.assertIn(hint, response.json()["error"], body)
+        self.assertEqual(self.history.schedule(day), [])
 
 
 if __name__ == "__main__":
