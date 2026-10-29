@@ -123,6 +123,21 @@ def _iso_day(value) -> str:
         return ""
 
 
+def qc_position_text(item) -> str:
+    """Текст позиции ОТК: "Номер N · код · имя". Зеркало qcPositionText() в web/app.js."""
+    data = item if isinstance(item, dict) else {}
+    name = str(data.get("name") or "")
+    code = str(data.get("code") or "")
+    base = name or code
+    if name and code and code != name:
+        base = code + " · " + name
+    number = data.get("number")
+    text = "" if number is None else str(number).strip()
+    if text:
+        return "Номер " + text + (" · " + base if base else "")
+    return base or "—"
+
+
 def _period_dates(start: float, end: float) -> tuple[str, str, str]:
     first = date.fromisoformat(_day_of(start))
     last = date.fromisoformat(_day_of(end - 1.0))

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -1331,6 +1332,31 @@ class ApiTests(unittest.TestCase):
         lines = response.text.splitlines()
         self.assertEqual(lines[0], "Позиция,Количество")
         self.assertTrue(any("Крышка" in line and "4" in line for line in lines[1:]))
+
+    def test_api_qc_csv_uses_position_text(self):
+        self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        payload = requests.get(self.url("/api/qc?date=2026-10-29"), timeout=3).json()
+        key = payload["items"][0]["part_key"]
+        conn = sqlite3.connect(str(Path(self.tmp.name) / "farm_history.db"))
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS parts_catalog (part_key TEXT PRIMARY KEY, number INTEGER)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO parts_catalog (part_key, number) VALUES (?, ?)",
+                (key, 7),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        response = requests.get(self.url("/api/qc.csv?date=2026-10-29"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        lines = response.text.splitlines()
+        self.assertEqual(lines[0], "Позиция,Количество")
+        self.assertTrue(
+            any("Номер 7" in line and "Крышка" in line and "4" in line for line in lines[1:]),
+            lines,
+        )
 
     def test_api_qc_csv_rejects_bad_date(self):
         response = requests.get(self.url("/api/qc.csv?date=нет"), timeout=3)

@@ -204,6 +204,7 @@ let planCalendar = null;
 let planCalendarMonth = "";
 let planCalendarRequest = 0;
 let planLoadedAt = 0;
+let planLoadedMonth = "";
 let planSelection = null;
 let overviewProgressEl = null;
 let planProgressEl = null;
@@ -3286,6 +3287,7 @@ async function loadPlanMonth(key, force) {
     if (planCalendarMonth !== key) return;
     planCalendar = data;
     planLoadedAt = Date.now();
+    planLoadedMonth = key;
     renderPlanCalendar();
   } catch (error) {
     if (token !== planCalendarRequest) return;
@@ -3342,6 +3344,7 @@ async function refreshPlanMonth() {
   const key = planCalendarMonth || planMonthKey(new Date());
   planCalendarCache.clear();
   planCalendar = null;
+  planLoadedMonth = "";
   renderPlanCalendar();
   await loadPlanMonth(key, true);
 }
@@ -3352,9 +3355,9 @@ function openPlanTab() {
   if (!planSelectionInMonth(planCalendarMonth)) {
     planSelection = planDefaultSelection(planCalendarMonth);
   }
-  planCalendar = planCacheGet(planCalendarMonth) || planCalendar;
+  planCalendar = planCacheGet(planCalendarMonth) || null;
   renderPlanCalendar();
-  if (!planCalendar || Date.now() - planLoadedAt > PLAN_POLL_MS) {
+  if (!planCalendar || planCalendarMonth !== planLoadedMonth || Date.now() - planLoadedAt > PLAN_POLL_MS) {
     loadPlan();
     loadPlanMonth(planCalendarMonth);
   }
@@ -3365,7 +3368,7 @@ function closePlanTab() {
 }
 
 function activePrinting() {
-  return state.printers.filter(function (view) {
+  return (state.printers || []).filter(function (view) {
     return view && (view.state === "printing" || view.state === "paused");
   });
 }
@@ -3664,7 +3667,7 @@ function advicePartTitle(part) {
 }
 
 function buildAdvice() {
-  const free = state.printers.filter(function (view) {
+  const free = (state.printers || []).filter(function (view) {
     return view && view.state === "idle";
   });
   const items = planData && planData.day && Array.isArray(planData.day.items)
@@ -3695,7 +3698,7 @@ function buildAdvice() {
 
 function renderAdvice() {
   if (!adviceEl || !adviceListEl || !adviceEmptyEl) return;
-  const free = state.printers.filter(function (view) {
+  const free = (state.printers || []).filter(function (view) {
     return view && view.state === "idle";
   });
   const items = planData && planData.day && Array.isArray(planData.day.items)

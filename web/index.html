@@ -56,15 +56,15 @@
   </header>
 
   <nav class="tabs" role="tablist" aria-label="Разделы дашборда">
-    <button type="button" role="tab" data-tab="overview" aria-selected="true">Обзор</button>
-    <button type="button" role="tab" data-tab="files" aria-selected="false">Файлы</button>
-    <button type="button" role="tab" data-tab="plan" aria-selected="false">План</button>
-    <button type="button" role="tab" data-tab="shift" aria-selected="false">Смена</button>
-    <button type="button" role="tab" data-tab="printers" aria-selected="false">Принтеры</button>
-    <button type="button" role="tab" data-tab="log" aria-selected="false">Журнал</button>
+    <button type="button" role="tab" id="tab-overview" aria-controls="panel-overview" data-tab="overview" aria-selected="true">Обзор</button>
+    <button type="button" role="tab" id="tab-files" aria-controls="panel-files" data-tab="files" aria-selected="false">Файлы</button>
+    <button type="button" role="tab" id="tab-plan" aria-controls="panel-plan" data-tab="plan" aria-selected="false">План</button>
+    <button type="button" role="tab" id="tab-shift" aria-controls="panel-shift" data-tab="shift" aria-selected="false">Смена</button>
+    <button type="button" role="tab" id="tab-printers" aria-controls="panel-printers" data-tab="printers" aria-selected="false">Принтеры</button>
+    <button type="button" role="tab" id="tab-log" aria-controls="panel-log" data-tab="log" aria-selected="false">Журнал</button>
   </nav>
 
-  <section id="panel-overview" data-panel="overview">
+  <section id="panel-overview" data-panel="overview" role="tabpanel" aria-labelledby="tab-overview">
   <section class="summary" id="summary" aria-label="Сводка по ферме">
     <button class="stat printing" type="button" data-stat="printing" data-filter="printing" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>печатают</small></div></button>
     <button class="stat paused" type="button" data-stat="paused" data-filter="paused" aria-pressed="false"><span class="dot"></span><div><b data-stat-value>0</b><small>на паузе</small></div></button>
@@ -151,12 +151,12 @@
   <noscript><p class="noscript">Для дашборда нужен JavaScript. Сервер работает, но данные не обновляются.</p></noscript>
   </section>
 
-  <section class="tab-panel" id="panel-files" data-panel="files" hidden>
+  <section class="tab-panel" id="panel-files" data-panel="files" role="tabpanel" aria-labelledby="tab-files" hidden>
     <h2>Файлы</h2>
     <p class="tab-note">Скоро здесь появятся файлы для отправки на принтеры.</p>
   </section>
 
-  <section class="tab-panel plan-tab" id="panel-plan" data-panel="plan" hidden>
+  <section class="tab-panel plan-tab" id="panel-plan" data-panel="plan" role="tabpanel" aria-labelledby="tab-plan" hidden>
     <div class="plan-toolbar">
       <button class="icon-btn plan-nav" id="plan-prev" type="button" aria-label="Предыдущий месяц">‹</button>
       <h2 class="plan-month" id="plan-month" aria-live="polite">—</h2>
@@ -195,18 +195,18 @@
     </div>
   </section>
 
-  <section class="tab-panel" id="panel-shift" data-panel="shift" hidden>
+  <section class="tab-panel" id="panel-shift" data-panel="shift" role="tabpanel" aria-labelledby="tab-shift" hidden>
     <h2>Смена</h2>
     <p class="tab-note">Скоро здесь появится смена.</p>
   </section>
 
-  <section class="tab-panel" id="panel-printers" data-panel="printers" hidden>
+  <section class="tab-panel" id="panel-printers" data-panel="printers" role="tabpanel" aria-labelledby="tab-printers" hidden>
     <h2>Принтеры</h2>
     <p class="tab-note">Список принтеров открывается в отдельном окне.</p>
     <button class="btn primary" type="button" data-action="open-printers">Открыть список принтеров</button>
   </section>
 
-  <section id="panel-log" data-panel="log" hidden>
+  <section id="panel-log" data-panel="log" role="tabpanel" aria-labelledby="tab-log" hidden>
   <section class="journal-panel" id="journal-panel" aria-label="Журнал событий">
   <header class="journal-head">
     <h2>Журнал</h2>

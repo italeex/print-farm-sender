@@ -34,7 +34,7 @@ from farm_core import (
     print_action,
     save_config,
 )
-from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore, _iso_day
+from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore, _iso_day, qc_position_text
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
@@ -599,7 +599,7 @@ class FarmHandler(BaseHTTPRequestHandler):
         writer = csv.writer(buf)
         writer.writerow(["Позиция", "Количество"])
         for item in report.get("items") or []:
-            writer.writerow([item.get("name") or item.get("code") or "", item.get("count") or 0])
+            writer.writerow([qc_position_text(item), item.get("count") or 0])
         self._send_csv(buf.getvalue())
 
     def _qc_day(self, query) -> str | None:
