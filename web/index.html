@@ -179,6 +179,28 @@
       </table>
       <p class="catalog-empty" id="catalog-empty" hidden>каталог пуст — импортируйте план</p>
     </div>
+    <section class="matrix-card" aria-label="Матрица файлов">
+      <h3>Матрица</h3>
+      <div class="matrix-actions" role="group" aria-label="Действия с файлами">
+        <button class="btn ghost" id="file-rows-all" type="button">Все</button>
+        <button class="btn ghost" id="file-rows-none" type="button">Снять</button>
+        <span class="sep" aria-hidden="true"></span>
+        <button class="btn primary" id="file-distribute" type="button">Разложить</button>
+        <button class="btn ghost" id="file-refresh" type="button">Обновить</button>
+        <button class="btn danger" id="file-delete-selected" type="button">Удалить с выбранных</button>
+        <button class="btn danger" id="file-delete-all" type="button">Удалить везде</button>
+        <button class="btn ghost" id="file-sync" type="button">Обновить список</button>
+      </div>
+      <p class="tab-note" id="file-action-summary" role="status">Выберите детали и принтеры.</p>
+      <div class="matrix-wrap">
+        <table class="matrix-table" id="file-matrix">
+          <thead id="matrix-head"></thead>
+          <tbody id="matrix-body"></tbody>
+        </table>
+        <p class="catalog-empty" id="matrix-empty" hidden>нет данных</p>
+      </div>
+      <div class="file-result" id="file-result" role="status" aria-live="polite" hidden></div>
+    </section>
   </section>
 
   <section class="tab-panel plan-tab" id="panel-plan" data-panel="plan" role="tabpanel" aria-labelledby="tab-plan" hidden>

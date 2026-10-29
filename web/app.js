@@ -78,6 +78,8 @@ const state = {
   catalogProblems: false,
   catalogChecked: new Set(),
   catalogRequest: 0,
+  matrixPrinters: new Set(),
+  fileBusy: false,
 };
 
 const cards = new Map();
@@ -253,6 +255,18 @@ let catalogBodyEl = null;
 let catalogEmptyEl = null;
 let catalogStatusEl = null;
 let catalogSelectAllEl = null;
+let matrixHeadEl = null;
+let matrixBodyEl = null;
+let matrixEmptyEl = null;
+let fileSummaryEl = null;
+let fileResultEl = null;
+let fileRowsAllEl = null;
+let fileRowsNoneEl = null;
+let fileDistributeEl = null;
+let fileRefreshEl = null;
+let fileDeleteSelectedEl = null;
+let fileDeleteAllEl = null;
+let fileSyncEl = null;
 function pick(root, selectors) {
   for (const selector of selectors) {
     const found = root.querySelector(selector);
@@ -4130,12 +4144,342 @@ function renderCatalog() {
     catalogSelectAllEl.checked = rows.length > 0 && checked === rows.length;
     catalogSelectAllEl.indeterminate = checked > 0 && checked < rows.length;
   }
+  renderFileMatrix();
 }
 
 async function heartbeat() {
   try {
     await requestJSON("/api/heartbeat", { method: "POST", body: {}, timeout: 4000 });
   } catch {}
+}
+
+function matrixPrinterKeys() {
+  const keys = [];
+  for (const view of state.printers || []) {
+    if (view && view.key && keys.indexOf(view.key) === -1) keys.push(view.key);
+  }
+  for (const key of Object.keys(state.catalogStatuses || {})) {
+    if (keys.indexOf(key) === -1) keys.push(key);
+  }
+  return keys;
+}
+
+function printerView(key) {
+  for (const view of state.printers || []) {
+    if (view && view.key === key) return view;
+  }
+  return null;
+}
+
+function printerShort(key) {
+  const view = printerView(key);
+  const host = view && view.host ? String(view.host) : "";
+  const octet = host.split(".").pop() || "";
+  if (/^\d+$/.test(octet)) return octet.slice(-3);
+  const tail = String((view && view.name) || key).match(/(\d+)\D*$/);
+  if (tail) return tail[1].slice(-3);
+  return String(key).slice(-3);
+}
+
+function printerTitle(key) {
+  const view = printerView(key);
+  const name = view && view.name ? String(view.name) : key;
+  const host = view && view.host ? String(view.host) : "";
+  return host ? name + " · " + host : name;
+}
+
+function selectedCatalogParts() {
+  const items = state.catalogItems || [];
+  return items.filter(function (item) {
+    return item && state.catalogChecked.has(item.part_key);
+  });
+}
+
+function selectedMatrixPrinters() {
+  return matrixPrinterKeys().filter(function (key) {
+    return state.matrixPrinters.has(key);
+  });
+}
+
+function remoteFileName(item) {
+  if (!item || item.number === null || item.number === undefined) return "";
+  return "N" + String(item.number) + ".gcode";
+}
+
+function matrixStatusLabel(status) {
+  if (status === "ok") return "ок";
+  if (status === "stale") return "устарел";
+  if (status === "missing") return "нет";
+  if (status === "printing") return "печатается";
+  return "—";
+}
+
+function matrixCellTitle(status, remote) {
+  if (status === "ok") return "ок · файл " + remote + " совпадает с эталоном";
+  if (status === "stale") return "устарел · файл " + remote + " отличается от эталона";
+  if (status === "missing") return "нет · файла " + remote + " нет на принтере";
+  if (status === "printing") return "печатается · файл " + remote + " сейчас печатается";
+  return "нет данных";
+}
+
+function renderFileMatrix() {
+  if (!matrixHeadEl || !matrixBodyEl) return;
+  const rows = catalogFiltered();
+  const keys = matrixPrinterKeys();
+  matrixHeadEl.textContent = "";
+  matrixBodyEl.textContent = "";
+  const headRow = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.scope = "col";
+  const allPrinters = document.createElement("input");
+  allPrinters.type = "checkbox";
+  allPrinters.className = "check";
+  allPrinters.dataset.matrixAllPrinters = "1";
+  allPrinters.checked = keys.length > 0 && keys.every(function (key) {
+    return state.matrixPrinters.has(key);
+  });
+  allPrinters.setAttribute("aria-label", "Выбрать все принтеры");
+  corner.appendChild(allPrinters);
+  headRow.appendChild(corner);
+  for (const key of keys) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    const wrap = document.createElement("span");
+    wrap.className = "matrix-col";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "check";
+    box.dataset.matrixPrinter = key;
+    box.checked = state.matrixPrinters.has(key);
+    box.setAttribute("aria-label", "Выбрать принтер " + printerTitle(key));
+    const short = document.createElement("span");
+    short.className = "short";
+    short.textContent = printerShort(key);
+    wrap.appendChild(box);
+    wrap.appendChild(short);
+    cell.title = printerTitle(key);
+    cell.appendChild(wrap);
+    headRow.appendChild(cell);
+  }
+  matrixHeadEl.appendChild(headRow);
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    const nameWrap = document.createElement("span");
+    nameWrap.className = "matrix-rowname";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "check";
+    box.dataset.matrixRow = String(item.part_key);
+    box.checked = state.catalogChecked.has(item.part_key);
+    box.setAttribute("aria-label", "Выбрать " + (item.name || item.part_key));
+    const label = document.createElement("span");
+    const number = item.number === null || item.number === undefined ? "—" : "N" + String(item.number);
+    label.textContent = number + " · " + String(item.name || item.part_key);
+    nameWrap.appendChild(box);
+    nameWrap.appendChild(label);
+    nameCell.title = String(item.code || item.name || item.part_key);
+    nameCell.appendChild(nameWrap);
+    row.appendChild(nameCell);
+    const remote = remoteFileName(item);
+    for (const key of keys) {
+      const cell = document.createElement("td");
+      const per = (state.catalogStatuses || {})[key] || {};
+      const status = Object.prototype.hasOwnProperty.call(per, item.part_key) ? per[item.part_key] : "";
+      const mark = document.createElement("span");
+      mark.className = "matrix-cell" + (status ? " matrix-" + status : "");
+      mark.textContent = matrixStatusLabel(status);
+      mark.title = matrixCellTitle(status, remote || "—");
+      cell.appendChild(mark);
+      row.appendChild(cell);
+    }
+    matrixBodyEl.appendChild(row);
+  }
+  if (matrixEmptyEl) {
+    if (!rows.length || !keys.length) {
+      setText(matrixEmptyEl, !rows.length ? "нет позиций — измените фильтр" : "нет принтеров");
+      matrixEmptyEl.hidden = false;
+    } else {
+      matrixEmptyEl.hidden = true;
+    }
+  }
+  updateFileActions();
+}
+
+function updateFileActions() {
+  const parts = selectedCatalogParts();
+  const printers = selectedMatrixPrinters();
+  const columns = matrixPrinterKeys();
+  const hasRef = parts.some(function (item) {
+    return Boolean(item.file_path);
+  });
+  let bytes = 0;
+  for (const item of parts) {
+    const size = Number(item.file_size);
+    if (Number.isFinite(size) && size > 0) bytes += size;
+  }
+  if (fileSummaryEl) {
+    if (state.fileBusy) {
+      setText(fileSummaryEl, "Операция выполняется…");
+    } else if (!parts.length || !printers.length) {
+      setText(fileSummaryEl, "Выберите детали и принтеры.");
+    } else if (!hasRef) {
+      setText(fileSummaryEl, "Нет эталона — загрузка недоступна.");
+    } else {
+      setText(fileSummaryEl, "Готово: " + parts.length + " " + plural(parts.length, "файл", "файла", "файлов") +
+        " × " + printers.length + " " + plural(printers.length, "принтер", "принтера", "принтеров") +
+        " · передать ≈ " + formatBytes(bytes * printers.length));
+    }
+  }
+  const busy = state.fileBusy;
+  if (fileDistributeEl) fileDistributeEl.disabled = busy || !parts.length || !printers.length || !hasRef;
+  if (fileRefreshEl) fileRefreshEl.disabled = busy || !parts.length || !printers.length || !hasRef;
+  if (fileDeleteSelectedEl) fileDeleteSelectedEl.disabled = busy || !parts.length || !printers.length;
+  if (fileDeleteAllEl) fileDeleteAllEl.disabled = busy || !parts.length || !columns.length;
+  if (fileSyncEl) fileSyncEl.disabled = busy;
+  if (fileRowsAllEl) fileRowsAllEl.disabled = busy;
+  if (fileRowsNoneEl) fileRowsNoneEl.disabled = busy;
+}
+
+function renderFileResult(title, rows, done, total) {
+  if (!fileResultEl) return;
+  fileResultEl.textContent = "";
+  fileResultEl.hidden = false;
+  const head = document.createElement("div");
+  head.className = "file-result-title";
+  head.textContent = title + " " + done + " из " + total;
+  fileResultEl.appendChild(head);
+  const byPrinter = new Map();
+  for (const row of rows) {
+    const key = String(row.printer);
+    if (!byPrinter.has(key)) byPrinter.set(key, []);
+    byPrinter.get(key).push(row);
+  }
+  for (const entry of byPrinter) {
+    const key = entry[0];
+    const list = entry[1];
+    const failed = list.filter(function (row) {
+      return !row.ok;
+    });
+    const line = document.createElement("div");
+    if (failed.length) line.className = "file-bad";
+    const name = printerTitle(key);
+    if (!failed.length) {
+      line.textContent = name + ": ок (" + list.length + ")";
+    } else {
+      line.textContent = name + ": " + failed.map(function (row) {
+        return String(row.error || "Ошибка");
+      }).join("; ");
+    }
+    fileResultEl.appendChild(line);
+  }
+  if (!rows.length) {
+    const line = document.createElement("div");
+    line.textContent = "Нечего делать.";
+    fileResultEl.appendChild(line);
+  }
+}
+
+async function fileRunBatches(kind, jobs, progressWord) {
+  state.fileBusy = true;
+  updateFileActions();
+  const total = jobs.reduce(function (sum, job) {
+    return sum + job.printers.length;
+  }, 0);
+  const rows = [];
+  let done = 0;
+  const path = kind === "upload" ? "/api/files/upload" : "/api/files/delete";
+  for (const job of jobs) {
+    let batch = [];
+    try {
+      const data = await requestJSON(path, {
+        method: "POST",
+        body: { parts: [job.part], printers: job.printers },
+        timeout: FS_TIMEOUT_MS,
+      });
+      batch = data && Array.isArray(data.results) ? data.results : [];
+    } catch (error) {
+      batch = job.printers.map(function (key) {
+        return { printer: key, part: job.part, ok: false, error: errorText(error, "Не удалось выполнить операцию.") };
+      });
+    }
+    for (const row of batch) rows.push(row);
+    done += job.printers.length;
+    renderFileResult(progressWord + "…", rows, done, total);
+  }
+  const ok = rows.filter(function (row) {
+    return row.ok;
+  }).length;
+  renderFileResult(progressWord + ".", rows, ok, total);
+  state.fileBusy = false;
+  updateFileActions();
+  await loadCatalog();
+  const failed = rows.filter(function (row) {
+    return !row.ok;
+  });
+  if (failed.length && ok) toast(progressWord + ": успешно " + ok + ", ошибок " + failed.length + ".", "warn");
+  else if (failed.length) toast(failed[0].error || "Операция не выполнена.", "error");
+  else toast(progressWord + ": " + ok + ".");
+}
+
+async function fileDistribute() {
+  if (state.fileBusy) return;
+  const parts = selectedCatalogParts().filter(function (item) {
+    return Boolean(item.file_path);
+  });
+  const printers = selectedMatrixPrinters();
+  if (!parts.length || !printers.length) {
+    toast("Выберите детали с эталоном и принтеры.", "warn");
+    return;
+  }
+  await fileRunBatches("upload", parts.map(function (item) {
+    return { part: String(item.part_key), printers: printers.slice() };
+  }), "Разложено");
+}
+
+async function fileRefreshMissing() {
+  if (state.fileBusy) return;
+  const parts = selectedCatalogParts().filter(function (item) {
+    return Boolean(item.file_path);
+  });
+  const printers = selectedMatrixPrinters();
+  if (!parts.length || !printers.length) {
+    toast("Выберите детали с эталоном и принтеры.", "warn");
+    return;
+  }
+  const jobs = [];
+  for (const item of parts) {
+    const need = printers.filter(function (key) {
+      const per = (state.catalogStatuses || {})[key] || {};
+      const status = per[item.part_key];
+      return status === "missing" || status === "stale";
+    });
+    if (need.length) jobs.push({ part: String(item.part_key), printers: need });
+  }
+  if (!jobs.length) {
+    toast("Всё актуально.", "info");
+    return;
+  }
+  await fileRunBatches("upload", jobs, "Обновлено");
+}
+
+async function fileDelete(everywhere) {
+  if (state.fileBusy) return;
+  const parts = selectedCatalogParts().filter(function (item) {
+    return item.number !== null && item.number !== undefined;
+  });
+  const printers = everywhere ? matrixPrinterKeys() : selectedMatrixPrinters();
+  if (!parts.length || !printers.length) {
+    toast("Выберите детали и принтеры.", "warn");
+    return;
+  }
+  const names = parts.map(remoteFileName).filter(Boolean);
+  const confirmed = await confirmDialog("Удалить файлы " + names.join(", ") + " с принтеров: " +
+    printers.map(printerTitle).join(", ") + ". Действие необратимо.");
+  if (!confirmed) return;
+  await fileRunBatches("delete", parts.map(function (item) {
+    return { part: String(item.part_key), printers: printers.slice() };
+  }), "Удалено");
 }
 
 function handleKeyboard(event) {
@@ -4381,6 +4725,18 @@ function init() {
   catalogEmptyEl = document.getElementById("catalog-empty");
   catalogStatusEl = document.getElementById("catalog-status");
   catalogSelectAllEl = document.getElementById("catalog-select-all");
+  matrixHeadEl = document.getElementById("matrix-head");
+  matrixBodyEl = document.getElementById("matrix-body");
+  matrixEmptyEl = document.getElementById("matrix-empty");
+  fileSummaryEl = document.getElementById("file-action-summary");
+  fileResultEl = document.getElementById("file-result");
+  fileRowsAllEl = document.getElementById("file-rows-all");
+  fileRowsNoneEl = document.getElementById("file-rows-none");
+  fileDistributeEl = document.getElementById("file-distribute");
+  fileRefreshEl = document.getElementById("file-refresh");
+  fileDeleteSelectedEl = document.getElementById("file-delete-selected");
+  fileDeleteAllEl = document.getElementById("file-delete-all");
+  fileSyncEl = document.getElementById("file-sync");
   qcOpenEl = document.getElementById("qc-open");
   qcDateEl = document.getElementById("qc-date");
   qcPrevEl = document.getElementById("qc-prev");
@@ -4589,9 +4945,67 @@ function init() {
       if (!key) return;
       if (target.checked) state.catalogChecked.add(key);
       else state.catalogChecked.delete(key);
+      if (catalogSelectAllEl) {
+        const rows = catalogFiltered();
+        const checked = rows.filter(function (item) {
+          return state.catalogChecked.has(item.part_key);
+        }).length;
+        catalogSelectAllEl.checked = rows.length > 0 && checked === rows.length;
+        catalogSelectAllEl.indeterminate = checked > 0 && checked < rows.length;
+      }
+      renderFileMatrix();
     });
   }
 
+  if (fileRowsAllEl) fileRowsAllEl.addEventListener("click", function () {
+    if (state.fileBusy) return;
+    for (const item of catalogFiltered()) state.catalogChecked.add(item.part_key);
+    renderCatalog();
+  });
+  if (fileRowsNoneEl) fileRowsNoneEl.addEventListener("click", function () {
+    if (state.fileBusy) return;
+    for (const item of catalogFiltered()) state.catalogChecked.delete(item.part_key);
+    renderCatalog();
+  });
+  if (fileDistributeEl) fileDistributeEl.addEventListener("click", fileDistribute);
+  if (fileRefreshEl) fileRefreshEl.addEventListener("click", fileRefreshMissing);
+  if (fileDeleteSelectedEl) fileDeleteSelectedEl.addEventListener("click", function () {
+    fileDelete(false);
+  });
+  if (fileDeleteAllEl) fileDeleteAllEl.addEventListener("click", function () {
+    fileDelete(true);
+  });
+  if (fileSyncEl) fileSyncEl.addEventListener("click", function () {
+    loadCatalog();
+  });
+  if (matrixHeadEl) matrixHeadEl.addEventListener("change", function (event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.localName !== "input") return;
+    if (target.hasAttribute("data-matrix-all-printers")) {
+      const keys = matrixPrinterKeys();
+      if (target.checked) {
+        for (const key of keys) state.matrixPrinters.add(key);
+      } else {
+        state.matrixPrinters.clear();
+      }
+      renderFileMatrix();
+      return;
+    }
+    const key = target.getAttribute("data-matrix-printer");
+    if (!key) return;
+    if (target.checked) state.matrixPrinters.add(key);
+    else state.matrixPrinters.delete(key);
+    renderFileMatrix();
+  });
+  if (matrixBodyEl) matrixBodyEl.addEventListener("change", function (event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.localName !== "input") return;
+    const key = target.getAttribute("data-matrix-row");
+    if (!key) return;
+    if (target.checked) state.catalogChecked.add(key);
+    else state.catalogChecked.delete(key);
+    renderCatalog();
+  });
   if (printerForm) printerForm.addEventListener("submit", savePrinter);
   if (printerResetEl) printerResetEl.addEventListener("click", resetPrinterForm);
   if (printerDeleteEl) printerDeleteEl.addEventListener("click", deletePrinter);
