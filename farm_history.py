@@ -129,6 +129,13 @@ def _period_dates(start: float, end: float) -> tuple[str, str, str]:
     return first.isoformat(), last.isoformat(), (first - timedelta(days=first.weekday())).isoformat()
 
 
+def _local_ts(moment: datetime) -> float:
+    try:
+        return moment.timestamp()
+    except (OSError, OverflowError, ValueError):
+        return (moment - datetime(1970, 1, 1)).total_seconds()
+
+
 def _month_first(month) -> date:
     text = str(month or "").strip()
     parts = text.split("-")
@@ -413,19 +420,11 @@ class HistoryStore:
                 start, end = _period_bounds(period, moment)
                 start_date, end_date, week_start = _period_dates(start, end)
                 items = self._period_items(start, end, self._actuals(start, end))
-                plan_rows = bool(items)
+                plan_rows = any(item["target"] > 0 for item in items)
                 in_progress = live if start_date <= today <= end_date else {}
                 items = _with_live(items, in_progress)
-                if plan_rows:
-                    parts_target = sum(item["target"] for item in items)
-                    parts_done = sum(item["actual"] for item in items)
-                else:
-                    parts_target = 0
-                    parts_done = self._conn.execute(
-                        "SELECT COALESCE(SUM(parts), 0) FROM events "
-                        "WHERE event = 'complete' AND ts >= ? AND ts < ?",
-                        (start, end),
-                    ).fetchone()[0] or 0
+                parts_target = sum(item["target"] for item in items)
+                parts_done = sum(item["actual"] for item in items)
                 parts_in_progress = sum(item["in_progress"] for item in items)
                 hours = 0.0
                 for key in printers:
@@ -681,7 +680,14 @@ class HistoryStore:
         for (day, key), count in actuals.items():
             entry = entries.get(key)
             if entry is None:
-                continue
+                entry = entries[key] = {
+                    "key": key,
+                    "code": "",
+                    "name": "",
+                    "target": 0,
+                    "actual": 0,
+                    "days": {},
+                }
             entry["actual"] += count
             entry["days"].setdefault(day, {"date": day, "target": 0, "actual": 0})["actual"] += count
         items = []
@@ -697,8 +703,8 @@ class HistoryStore:
 
     def _day_actuals(self, first: str, last: str) -> dict[tuple[str, str], int]:
         try:
-            start = datetime.fromisoformat(first).timestamp()
-            end = (datetime.fromisoformat(last) + timedelta(days=1)).timestamp()
+            start = _local_ts(datetime.fromisoformat(first))
+            end = _local_ts(datetime.fromisoformat(last) + timedelta(days=1))
         except (OSError, OverflowError, ValueError):
             return {}
         totals: dict[tuple[str, str], int] = {}

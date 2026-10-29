@@ -1041,7 +1041,7 @@ class ApiTests(unittest.TestCase):
         busy = requests.get(self.url("/api/plan"), timeout=3).json()["day"]
         self.assertEqual(busy["parts_done"], 35)
         self.assertEqual(busy["parts_in_progress"], 16)
-        self.assertEqual(busy["items"][0]["actual"], 0)
+        self.assertEqual(busy["items"][0]["actual"], 35)
         self.assertEqual(busy["items"][0]["in_progress"], 16)
 
     def test_plan_calendar_live_parts(self):
@@ -1062,6 +1062,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(week["items"][0]["in_progress"], 16)
         others = [item for item in payload["weeks"] if not item["start"] <= today <= item["end"]]
         self.assertTrue(all(item["parts_in_progress"] == 0 for item in others))
+
+    def test_plan_json_exposes_parts_in_progress(self):
+        payload = requests.get(self.url("/api/plan"), timeout=3).json()
+        for period in ("day", "week", "month"):
+            self.assertIn("parts_in_progress", payload[period])
+            self.assertNotIn("in_progress", payload[period])
+        payload = requests.get(self.url("/api/plan/calendar"), timeout=3).json()
+        for day in payload["days"]:
+            self.assertIn("parts_in_progress", day)
+            self.assertNotIn("in_progress", day)
+        for week in payload["weeks"]:
+            self.assertIn("parts_in_progress", week)
+            self.assertNotIn("in_progress", week)
 
     def test_plan_validation(self):
         bad_period = requests.post(

@@ -2769,7 +2769,7 @@ function planWeekInfo(startKey) {
       week: Number(found.week) || planIsoWeek(start).week,
       target: Number(found.target) || 0,
       actual: Number(found.actual) || 0,
-      in_progress: planInProgress(found.in_progress),
+      in_progress: planInProgress(found.parts_in_progress),
       items: Array.isArray(found.items) ? found.items.filter(Boolean) : [],
     };
   }
@@ -2785,7 +2785,7 @@ function planWeekInfo(startKey) {
   for (const entry of entries) {
     target += Number(entry.target) || 0;
     actual += Number(entry.actual) || 0;
-    inProgress += planInProgress(entry.in_progress);
+    inProgress += planInProgress(entry.parts_in_progress);
   }
   return {
     start: start,
@@ -2808,7 +2808,9 @@ function planStatusClass(target, actual) {
 }
 
 function planDayStatus(entry) {
-  return planStatusClass(entry ? entry.target : 0, entry ? entry.actual : 0);
+  const target = entry ? Number(entry.target) || 0 : 0;
+  const actual = (entry ? Number(entry.actual) || 0 : 0) + planInProgress(entry ? entry.parts_in_progress : 0);
+  return planStatusClass(target, actual);
 }
 
 function planCountLabel(target, actual, inProgress) {
@@ -2900,7 +2902,7 @@ function planCalendarRow(dayButton, entry, date, monthIndex, todayKey) {
   count.className = "plan-day-count";
   const target = entry ? Number(entry.target) || 0 : 0;
   const actual = entry ? Number(entry.actual) || 0 : 0;
-  const inProgress = planInProgress(entry ? entry.in_progress : 0);
+  const inProgress = planInProgress(entry ? entry.parts_in_progress : 0);
   count.textContent = target > 0 || actual > 0 || inProgress > 0
     ? planCountLabel(target, actual, inProgress)
     : "";
@@ -2924,7 +2926,10 @@ function planWeekButton(startKey, isoWeek) {
   button.setAttribute("aria-pressed", selected ? "true" : "false");
   if (selected) button.setAttribute("aria-current", "true");
   else button.removeAttribute("aria-current");
-  const status = planStatusClass(info ? info.target : 0, info ? info.actual : 0);
+  const status = planStatusClass(
+    info ? info.target : 0,
+    info ? info.actual + planInProgress(info.in_progress) : 0
+  );
   if (status) button.classList.add(status);
   const number = document.createElement("span");
   number.className = "plan-week-num";
@@ -2973,7 +2978,7 @@ function renderPlanCalendar() {
         const entry = planDayEntry(day.date) || {
           target: Number(day.target) || 0,
           actual: Number(day.actual) || 0,
-          in_progress: planInProgress(day.in_progress),
+          parts_in_progress: planInProgress(day.parts_in_progress),
           items: [],
         };
         const button = document.createElement("button");
@@ -3047,7 +3052,7 @@ function renderPlanTable(items) {
     }
     const percentCell = document.createElement("td");
     percentCell.className = "plan-percent";
-    if (inProgress > 0) {
+    if (inProgress > 0 && target > 0) {
       percentCell.title = "Учтено " + formatPlanNumber(accounted) + " из " + formatPlanNumber(target);
     }
     const track = document.createElement("div");
@@ -3091,7 +3096,7 @@ function renderPlanSelection() {
       if (entry) {
         target = Number(entry.target) || 0;
         actual = Number(entry.actual) || 0;
-        inProgress = planInProgress(entry.in_progress);
+        inProgress = planInProgress(entry.parts_in_progress);
         items = Array.isArray(entry.items) ? entry.items.filter(Boolean) : [];
       }
     }

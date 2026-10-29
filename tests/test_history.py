@@ -401,9 +401,9 @@ class HistoryStoreTests(unittest.TestCase):
         self.record(make_view("idle", "Крышка.gcode"), printing, BASE + 60)
         plan = self.history.plan(now=BASE + 60)["day"]
         self.assertEqual(plan["parts_target"], 10)
-        self.assertEqual(plan["parts_done"], 4)
-        self.assertEqual(plan["parts_percent"], 40.0)
-        self.assertEqual(len(plan["items"]), 1)
+        self.assertEqual(plan["parts_done"], 6)
+        self.assertEqual(plan["parts_percent"], 60.0)
+        self.assertEqual(len(plan["items"]), 2)
         item = plan["items"][0]
         self.assertEqual(item["key"], "ГР3.01.42000.01")
         self.assertEqual(item["code"], "МВСЛ.ГР3.01.42000.01")
@@ -412,6 +412,36 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(item["actual"], 4)
         self.assertEqual(item["percent"], 40.0)
         self.assertEqual(item["days"], [{"date": day, "target": 10, "actual": 4}])
+        extra = plan["items"][1]
+        self.assertEqual(extra["key"], "ГР3.02.10000.01")
+        self.assertEqual(extra["code"], "")
+        self.assertEqual(extra["name"], "")
+        self.assertEqual(extra["target"], 0)
+        self.assertEqual(extra["actual"], 2)
+        self.assertEqual(extra["percent"], 0.0)
+
+    def test_plan_completed_totals_match_calendar(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10}]
+        )
+        printing = make_view(
+            "printing",
+            "Крышка.gcode",
+            [
+                {"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 4},
+                {"name": "МВСЛ.ГР9.99.99999.99 Другое.stl", "count": 3},
+            ],
+        )
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "Крышка.gcode"), printing, BASE + 60)
+        plan = self.history.plan(now=BASE + 60)["day"]
+        data = self.history.calendar(now=BASE + 60)
+        calendar_day = next(item for item in data["days"] if item["date"] == day)
+        self.assertEqual(plan["parts_done"], 7)
+        self.assertEqual(calendar_day["actual"], 7)
+        self.assertEqual(plan["parts_in_progress"], 0)
+        self.assertEqual(calendar_day["parts_in_progress"], 0)
 
     def test_plan_items_match_bare_stl_name(self):
         day = self.today()
