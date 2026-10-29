@@ -4222,6 +4222,25 @@ function matrixCellTitle(status, remote) {
   return "нет данных";
 }
 
+function matrixCellStatus(key, partKey) {
+  const per = (state.catalogStatuses || {})[key] || {};
+  return Object.prototype.hasOwnProperty.call(per, partKey) ? per[partKey] : "";
+}
+
+function fileSkippedRow(key, part) {
+  return { printer: key, part: part, ok: true, skipped: true };
+}
+
+function splitPrintingPrinters(partKey, printers) {
+  const targets = [];
+  const skipped = [];
+  for (const key of printers) {
+    if (matrixCellStatus(key, partKey) === "printing") skipped.push(key);
+    else targets.push(key);
+  }
+  return { targets: targets, skipped: skipped };
+}
+
 function renderFileMatrix() {
   if (!matrixHeadEl || !matrixBodyEl) return;
   const rows = catalogFiltered();
@@ -4361,16 +4380,24 @@ function renderFileResult(title, rows, done, total) {
     const failed = list.filter(function (row) {
       return !row.ok;
     });
+    const skipped = list.filter(function (row) {
+      return row.skipped;
+    });
+    const okCount = list.filter(function (row) {
+      return row.ok && !row.skipped;
+    }).length;
     const line = document.createElement("div");
-    if (failed.length) line.className = "file-bad";
     const name = printerTitle(key);
-    if (!failed.length) {
-      line.textContent = name + ": ок (" + list.length + ")";
-    } else {
-      line.textContent = name + ": " + failed.map(function (row) {
+    const chunks = [];
+    if (okCount) chunks.push("ок (" + okCount + ")");
+    if (skipped.length) chunks.push("пропущен: файл сейчас печатается (" + skipped.length + ")");
+    if (failed.length) {
+      line.className = "file-bad";
+      chunks.push(failed.map(function (row) {
         return String(row.error || "Ошибка");
-      }).join("; ");
+      }).join("; "));
     }
+    line.textContent = name + ": " + (chunks.length ? chunks.join("; ") : "—");
     fileResultEl.appendChild(line);
   }
   if (!rows.length) {
@@ -4380,15 +4407,17 @@ function renderFileResult(title, rows, done, total) {
   }
 }
 
-async function fileRunBatches(kind, jobs, progressWord) {
+async function fileRunBatches(kind, jobs, progressWord, prefill) {
   state.fileBusy = true;
   updateFileActions();
-  const total = jobs.reduce(function (sum, job) {
+  const skippedRows = Array.isArray(prefill) ? prefill : [];
+  const total = skippedRows.length + jobs.reduce(function (sum, job) {
     return sum + job.printers.length;
   }, 0);
-  const rows = [];
-  let done = 0;
+  const rows = skippedRows.slice();
+  let done = skippedRows.length;
   const path = kind === "upload" ? "/api/files/upload" : "/api/files/delete";
+  renderFileResult(progressWord + "…", rows, done, total);
   for (const job of jobs) {
     let batch = [];
     try {
@@ -4408,17 +4437,23 @@ async function fileRunBatches(kind, jobs, progressWord) {
     renderFileResult(progressWord + "…", rows, done, total);
   }
   const ok = rows.filter(function (row) {
-    return row.ok;
+    return row.ok && !row.skipped;
   }).length;
-  renderFileResult(progressWord + ".", rows, ok, total);
+  const skippedCount = rows.filter(function (row) {
+    return row.skipped;
+  }).length;
+  const skippedText = skippedCount ? " Пропущено: " + skippedCount + " (печатается)." : "";
+  renderFileResult(progressWord + ".", rows, ok + skippedCount, total);
   state.fileBusy = false;
   updateFileActions();
   await loadCatalog();
   const failed = rows.filter(function (row) {
     return !row.ok;
   });
-  if (failed.length && ok) toast(progressWord + ": успешно " + ok + ", ошибок " + failed.length + ".", "warn");
+  if (failed.length && ok) toast(progressWord + ": успешно " + ok + ", ошибок " + failed.length + "." + skippedText, "warn");
   else if (failed.length) toast(failed[0].error || "Операция не выполнена.", "error");
+  else if (skippedCount && ok) toast(progressWord + ": " + ok + "." + skippedText);
+  else if (skippedCount) toast("Пропущено: " + skippedCount + " (печатается).");
   else toast(progressWord + ": " + ok + ".");
 }
 
@@ -4432,9 +4467,15 @@ async function fileDistribute() {
     toast("Выберите детали с эталоном и принтеры.", "warn");
     return;
   }
-  await fileRunBatches("upload", parts.map(function (item) {
-    return { part: String(item.part_key), printers: printers.slice() };
-  }), "Разложено");
+  const jobs = [];
+  const skipped = [];
+  for (const item of parts) {
+    const part = String(item.part_key);
+    const split = splitPrintingPrinters(part, printers);
+    for (const key of split.skipped) skipped.push(fileSkippedRow(key, part));
+    if (split.targets.length) jobs.push({ part: part, printers: split.targets });
+  }
+  await fileRunBatches("upload", jobs, "Разложено", skipped);
 }
 
 async function fileRefreshMissing() {
@@ -4448,6 +4489,7 @@ async function fileRefreshMissing() {
     return;
   }
   const jobs = [];
+  const skipped = [];
   for (const item of parts) {
     const need = printers.filter(function (key) {
       const per = (state.catalogStatuses || {})[key] || {};
@@ -4460,7 +4502,7 @@ async function fileRefreshMissing() {
     toast("Всё актуально.", "info");
     return;
   }
-  await fileRunBatches("upload", jobs, "Обновлено");
+  await fileRunBatches("upload", jobs, "Обновлено", skipped);
 }
 
 async function fileDelete(everywhere) {
@@ -4474,12 +4516,26 @@ async function fileDelete(everywhere) {
     return;
   }
   const names = parts.map(remoteFileName).filter(Boolean);
+  const skipped = [];
+  const jobs = [];
+  for (const item of parts) {
+    const part = String(item.part_key);
+    const split = splitPrintingPrinters(part, printers);
+    for (const key of split.skipped) skipped.push(fileSkippedRow(key, part));
+    if (split.targets.length) jobs.push({ part: part, printers: split.targets });
+  }
+  let skippedNote = "";
+  if (skipped.length) {
+    const skippedPrinters = [];
+    for (const row of skipped) {
+      if (skippedPrinters.indexOf(row.printer) === -1) skippedPrinters.push(row.printer);
+    }
+    skippedNote = " Пропуск (печатается): " + skippedPrinters.map(printerTitle).join(", ") + ".";
+  }
   const confirmed = await confirmDialog("Удалить файлы " + names.join(", ") + " с принтеров: " +
-    printers.map(printerTitle).join(", ") + ". Действие необратимо.");
+    printers.map(printerTitle).join(", ") + "." + skippedNote + " Действие необратимо.");
   if (!confirmed) return;
-  await fileRunBatches("delete", parts.map(function (item) {
-    return { part: String(item.part_key), printers: printers.slice() };
-  }), "Удалено");
+  await fileRunBatches("delete", jobs, "Удалено", skipped);
 }
 
 function handleKeyboard(event) {
