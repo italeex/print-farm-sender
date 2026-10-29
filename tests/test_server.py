@@ -1417,5 +1417,291 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+class DictMonitor:
+    def __init__(self, views):
+        self.views = views
+
+    def snapshot(self):
+        return {"printers": [asdict(view) for view in self.views.values()], "updated_at": 0.0}
+
+    def set_printers(self, printers):
+        pass
+
+    def refresh(self):
+        pass
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def make_view_for(key, host, port, state="idle", file="", online=True):
+    return PrinterView(
+        key=key,
+        name="Узел " + key,
+        host=host,
+        port=port,
+        mainsail_url="http://127.0.0.1:4408",
+        mainsail_port=4408,
+        ui_kind="mainsail",
+        online=online,
+        state=state,
+        file=file,
+        progress=0.0,
+        layer=0,
+        layer_total=0,
+        eta_seconds=None,
+        finish_at=None,
+        nozzle=0.0,
+        bed=0.0,
+        filament="",
+        thumb_version="",
+        error=None,
+        last_seen=0.0,
+    )
+
+
+class FileApiTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.history = HistoryStore(Path(self.tmp.name) / "farm_history.db")
+        self.addCleanup(self.history.close)
+        self.moon_a = FakeMoonraker().start()
+        self.addCleanup(self.moon_a.stop)
+        self.moon_b = FakeMoonraker().start()
+        self.addCleanup(self.moon_b.stop)
+        self.key_a = f"127.0.0.1:{self.moon_a.port}"
+        self.key_b = f"127.0.0.1:{self.moon_b.port}"
+        self.config_path = Path(self.tmp.name) / "printers.json"
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "printers": [
+                        {"name": "Первый", "host": "127.0.0.1", "port": self.moon_a.port},
+                        {"name": "Второй", "host": "127.0.0.1", "port": self.moon_b.port},
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.views = {
+            self.key_a: make_view_for(self.key_a, "127.0.0.1", self.moon_a.port),
+            self.key_b: make_view_for(self.key_b, "127.0.0.1", self.moon_b.port),
+        }
+        self.monitor = DictMonitor(self.views)
+        self.app = FarmApp(
+            config_path=self.config_path,
+            monitor=self.monitor,
+            start_monitor=False,
+            history=self.history,
+        )
+        self.addCleanup(self.app.job.cancel)
+        self.server = create_server(self.app, port=0)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.ref_a = Path(self.tmp.name) / "ref_a.gcode"
+        self.ref_a.write_bytes(b"G1 X0\nG1 X1\n")
+        self.ref_b = Path(self.tmp.name) / "ref_b.gcode"
+        self.ref_b.write_bytes(b"G1 X0\nG1 X1\nG1 X2\n")
+
+    def url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def seed_catalog(self):
+        self.history.set_catalog("part-ok", number=1, file_path=str(self.ref_a))
+        self.history.set_catalog("part-stale", number=2, file_path=str(self.ref_b))
+        self.history.set_catalog("part-miss", number=3, file_path=str(self.ref_a))
+
+    def test_sync_populates_registry(self):
+        self.moon_a.store = {"FARM/N1.gcode": b"123456789012"}
+        response = requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["printers"][self.key_a]
+        self.assertTrue(payload["ok"])
+        self.assertEqual([item["name"] for item in payload["files"]], ["N1.gcode"])
+        registry = self.history.registry()
+        self.assertIn("N1.gcode", registry[self.key_a])
+        self.assertEqual(self.history.printer_mode(self.key_a), "folder")
+
+    def test_sync_partial_failure(self):
+        self.moon_b.stop()
+        response = requests.post(self.url("/api/files/sync"), json={}, timeout=10)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["printers"]
+        self.assertTrue(payload[self.key_a]["ok"])
+        self.assertFalse(payload[self.key_b]["ok"])
+        self.assertIn("error", payload[self.key_b])
+
+    def test_sync_rejects_bad_body(self):
+        response = requests.post(
+            self.url("/api/files/sync"), json={"printers": "нет"}, timeout=3
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("printers", response.json()["error"])
+
+    def test_catalog_statuses(self):
+        self.seed_catalog()
+        self.moon_a.store = {
+            "FARM/N1.gcode": self.ref_a.read_bytes(),
+            "FARM/N2.gcode": b"xx",
+        }
+        sync = requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        self.assertEqual(sync.status_code, 200)
+        self.views[self.key_a] = make_view_for(
+            self.key_a, "127.0.0.1", self.moon_a.port, state="printing", file="FARM/N2.gcode"
+        )
+        response = requests.get(self.url("/api/catalog?sync=1"), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        statuses = response.json()["statuses"][self.key_a]
+        self.assertEqual(statuses["part-ok"], "ok")
+        self.assertEqual(statuses["part-stale"], "printing")
+        self.assertEqual(statuses["part-miss"], "missing")
+        self.views[self.key_a] = make_view_for(
+            self.key_a, "127.0.0.1", self.moon_a.port, state="idle", file=""
+        )
+        again = requests.get(self.url("/api/catalog?sync=1"), timeout=5)
+        statuses = again.json()["statuses"][self.key_a]
+        self.assertEqual(statuses["part-stale"], "stale")
+
+    def test_catalog_statuses_survive_offline(self):
+        self.seed_catalog()
+        self.moon_a.store = {"FARM/N1.gcode": self.ref_a.read_bytes()}
+        requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        self.views[self.key_a] = make_view_for(
+            self.key_a, "127.0.0.1", self.moon_a.port, state="offline", file="", online=False
+        )
+        response = requests.get(self.url("/api/catalog?sync=1"), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        statuses = response.json()["statuses"][self.key_a]
+        self.assertEqual(statuses["part-ok"], "ok")
+        self.assertEqual(statuses["part-miss"], "missing")
+
+    def test_upload_skips_printing_printer(self):
+        self.history.set_catalog("part-one", number=7, file_path=str(self.ref_a))
+        self.views[self.key_a] = make_view_for(
+            self.key_a, "127.0.0.1", self.moon_a.port, state="printing", file="FARM/N7.gcode"
+        )
+        response = requests.post(
+            self.url("/api/files/upload"),
+            json={"parts": ["part-one"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        row = response.json()["results"][0]
+        self.assertFalse(row["ok"])
+        self.assertIn("печатается", row["error"])
+        self.assertNotIn("FARM/N7.gcode", self.moon_a.store)
+
+    def test_upload_rejects_missing_reference(self):
+        response = requests.post(
+            self.url("/api/files/upload"),
+            json={"parts": ["нет-детали"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        row = response.json()["results"][0]
+        self.assertFalse(row["ok"])
+        self.assertIn("эталон", row["error"].lower())
+
+    def test_upload_partial_failure(self):
+        self.history.set_catalog("part-one", number=7, file_path=str(self.ref_a))
+        self.moon_b.stop()
+        response = requests.post(
+            self.url("/api/files/upload"),
+            json={"parts": ["part-one"], "printers": [self.key_a, self.key_b]},
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        by_printer = {row["printer"]: row for row in response.json()["results"]}
+        self.assertTrue(by_printer[self.key_a]["ok"])
+        self.assertFalse(by_printer[self.key_b]["ok"])
+        self.assertIn("FARM/N7.gcode", self.moon_a.store)
+
+    def test_upload_mode_persisted_on_fallback(self):
+        self.moon_a.folder_broken = True
+        self.history.set_catalog("part-one", number=9, file_path=str(self.ref_a))
+        response = requests.post(
+            self.url("/api/files/upload"),
+            json={"parts": ["part-one"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["results"][0]["ok"])
+        self.assertEqual(self.history.printer_mode(self.key_a), "prefix")
+        self.assertIn("FARM_N9.gcode", self.moon_a.store)
+
+    def test_upload_rejects_bad_body(self):
+        response = requests.post(
+            self.url("/api/files/upload"), json={"parts": ["a"]}, timeout=3
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("printers", response.json()["error"])
+
+    def test_delete_skips_printing_and_unknown_part(self):
+        self.history.set_catalog("part-one", number=7, file_path=str(self.ref_a))
+        self.moon_a.store = {"FARM/N7.gcode": b"data"}
+        requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        self.views[self.key_a] = make_view_for(
+            self.key_a, "127.0.0.1", self.moon_a.port, state="printing", file="FARM/N7.gcode"
+        )
+        response = requests.post(
+            self.url("/api/files/delete"),
+            json={"parts": ["part-one", "нет-детали"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["results"]
+        printing_row = next(row for row in rows if row["part"] == "part-one")
+        self.assertFalse(printing_row["ok"])
+        self.assertIn("печатается", printing_row["error"])
+        unknown_row = next(row for row in rows if row["part"] == "нет-детали")
+        self.assertFalse(unknown_row["ok"])
+        self.assertIn("FARM/N7.gcode", self.moon_a.store)
+
+    def test_delete_only_farm_names_and_updates_registry(self):
+        self.history.set_catalog("part-one", number=7, file_path=str(self.ref_a))
+        self.moon_a.store = {"FARM/N7.gcode": b"data", "FARM_N7.gcode": b"data"}
+        requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        response = requests.post(
+            self.url("/api/files/delete"),
+            json={"parts": ["part-one"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["results"][0]["ok"])
+        for path in self.moon_a.request_paths:
+            if path.startswith("/server/files/gcodes/"):
+                self.assertTrue(
+                    path.startswith("/server/files/gcodes/FARM"),
+                    path,
+                )
+        registry = self.history.registry().get(self.key_a, {})
+        self.assertNotIn("N7.gcode", registry)
+
+    def test_delete_rejects_bad_body(self):
+        response = requests.post(
+            self.url("/api/files/delete"), json={"printers": [self.key_a]}, timeout=3
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("parts", response.json()["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

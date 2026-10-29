@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS file_registry (
+    printer_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0,
+    modified REAL NOT NULL DEFAULT 0,
+    seen_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (printer_key, name)
+);
+CREATE TABLE IF NOT EXISTS printer_files (
+    printer_key TEXT PRIMARY KEY,
+    mode TEXT NOT NULL DEFAULT 'folder',
+    checked_at REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -873,6 +886,17 @@ class HistoryStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number "
             "ON parts_catalog(number) WHERE number IS NOT NULL"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS file_registry ("
+            "printer_key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, "
+            "modified REAL NOT NULL DEFAULT 0, seen_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (printer_key, name))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS printer_files ("
+            "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "
+            "checked_at REAL NOT NULL DEFAULT 0)"
+        )
         self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
 
     def _seed_catalog_plans_locked(self) -> None:
@@ -1018,6 +1042,163 @@ class HistoryStore:
                 numbers[str(row["part_key"])] = None
         return numbers
 
+    def registry(self) -> dict:
+        with self._lock:
+            self._ensure_files_schema_locked()
+            rows = self._conn.execute(
+                "SELECT printer_key, name, size, modified, seen_at FROM file_registry"
+            ).fetchall()
+        result: dict = {}
+        for row in rows:
+            try:
+                size = int(row["size"])
+            except (TypeError, ValueError):
+                size = 0
+            try:
+                modified = float(row["modified"])
+            except (TypeError, ValueError):
+                modified = 0.0
+            try:
+                seen_at = float(row["seen_at"])
+            except (TypeError, ValueError):
+                seen_at = 0.0
+            result.setdefault(str(row["printer_key"]), {})[str(row["name"])] = {
+                "name": str(row["name"]),
+                "size": size,
+                "modified": modified,
+                "seen_at": seen_at,
+            }
+        return result
+
+    def set_registry(self, printer_key, entries) -> list[dict]:
+        key = str(printer_key or "").strip()
+        if not key:
+            raise ValueError("Не указан ключ принтера")
+        items = []
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                size = int(entry.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            try:
+                modified = float(entry.get("modified") or 0.0)
+            except (TypeError, ValueError):
+                modified = 0.0
+            try:
+                seen_at = float(entry.get("seen_at") or self._clock())
+            except (TypeError, ValueError):
+                seen_at = float(self._clock())
+            items.append((name, size, modified, seen_at))
+        with self._lock:
+            self._ensure_files_schema_locked()
+            self._conn.execute("DELETE FROM file_registry WHERE printer_key = ?", (key,))
+            self._conn.executemany(
+                "INSERT INTO file_registry (printer_key, name, size, modified, seen_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(key, name, size, modified, seen_at) for name, size, modified, seen_at in items],
+            )
+            self._conn.commit()
+        return [
+            {"name": name, "size": size, "modified": modified, "seen_at": seen_at}
+            for name, size, modified, seen_at in items
+        ]
+
+    def file_registry(self, printer_key, name, size, modified, seen_at) -> dict:
+        key = str(printer_key or "").strip()
+        item = str(name or "").strip()
+        if not key or not item:
+            raise ValueError("Не указаны принтер и файл")
+        try:
+            amount = int(size or 0)
+        except (TypeError, ValueError):
+            amount = 0
+        try:
+            moment = float(modified or 0.0)
+        except (TypeError, ValueError):
+            moment = 0.0
+        try:
+            stamp = float(seen_at if seen_at is not None else self._clock())
+        except (TypeError, ValueError):
+            stamp = float(self._clock())
+        with self._lock:
+            self._ensure_files_schema_locked()
+            self._conn.execute(
+                "INSERT INTO file_registry (printer_key, name, size, modified, seen_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(printer_key, name) DO UPDATE SET "
+                "size = excluded.size, modified = excluded.modified, seen_at = excluded.seen_at",
+                (key, item, amount, moment, stamp),
+            )
+            self._conn.commit()
+        return {"name": item, "size": amount, "modified": moment, "seen_at": stamp}
+
+    def printer_mode(self, printer_key) -> str:
+        key = str(printer_key or "").strip()
+        with self._lock:
+            self._ensure_files_schema_locked()
+            row = self._conn.execute(
+                "SELECT mode FROM printer_files WHERE printer_key = ?", (key,)
+            ).fetchone()
+        mode = str(row["mode"] or "").strip() if row is not None else ""
+        return mode if mode in ("folder", "prefix") else "folder"
+
+    def set_printer_mode(self, printer_key, mode) -> str:
+        key = str(printer_key or "").strip()
+        value = str(mode or "").strip()
+        if not key:
+            raise ValueError("Не указан ключ принтера")
+        if value not in ("folder", "prefix"):
+            raise ValueError("Неизвестный режим: " + (value or "пусто"))
+        with self._lock:
+            self._ensure_files_schema_locked()
+            self._conn.execute(
+                "INSERT INTO printer_files (printer_key, mode, checked_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(printer_key) DO UPDATE SET mode = excluded.mode",
+                (key, value, float(self._clock())),
+            )
+            self._conn.commit()
+        return value
+
+    def printer_files(self, printer_key, mode, checked_at) -> dict:
+        key = str(printer_key or "").strip()
+        value = str(mode or "").strip()
+        if not key:
+            raise ValueError("Не указан ключ принтера")
+        if value not in ("folder", "prefix"):
+            raise ValueError("Неизвестный режим: " + (value or "пусто"))
+        try:
+            stamp = float(checked_at if checked_at is not None else self._clock())
+        except (TypeError, ValueError):
+            stamp = float(self._clock())
+        with self._lock:
+            self._ensure_files_schema_locked()
+            self._conn.execute(
+                "INSERT INTO printer_files (printer_key, mode, checked_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(printer_key) DO UPDATE SET "
+                "mode = excluded.mode, checked_at = excluded.checked_at",
+                (key, value, stamp),
+            )
+            self._conn.commit()
+        return {"printer_key": key, "mode": value, "checked_at": stamp}
+
+    def _ensure_files_schema_locked(self) -> None:
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS file_registry ("
+            "printer_key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, "
+            "modified REAL NOT NULL DEFAULT 0, seen_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (printer_key, name))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS printer_files ("
+            "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "
+            "checked_at REAL NOT NULL DEFAULT 0)"
+        )
+
     def summary(self, since, until=None) -> dict:
         since = float(since)
         end = float(self._clock() if until is None else until)
@@ -1158,6 +1339,17 @@ class HistoryStore:
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number "
             "ON parts_catalog(number) WHERE number IS NOT NULL"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS file_registry ("
+            "printer_key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, "
+            "modified REAL NOT NULL DEFAULT 0, seen_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (printer_key, name))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS printer_files ("
+            "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "
+            "checked_at REAL NOT NULL DEFAULT 0)"
         )
 
     def _last_event(self, key, until=None) -> sqlite3.Row | None:

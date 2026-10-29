@@ -1001,5 +1001,29 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual([row["date"] for row in rows], [fresh])
 
 
+    def test_file_registry_roundtrip(self):
+        self.history.file_registry("k1:7125", "N7.gcode", 100, 50.0, BASE)
+        self.history.file_registry("k1:7125", "N8.gcode", 200, 60.0, BASE)
+        registry = self.history.registry()
+        self.assertEqual(registry["k1:7125"]["N7.gcode"]["size"], 100)
+        self.assertEqual(registry["k1:7125"]["N8.gcode"]["modified"], 60.0)
+
+    def test_set_registry_replaces_printer_entries(self):
+        self.history.file_registry("k1:7125", "N7.gcode", 100, 50.0, BASE)
+        self.history.set_registry(
+            "k1:7125",
+            [{"name": "N9.gcode", "size": 300, "modified": 70.0, "seen_at": BASE}],
+        )
+        registry = self.history.registry()
+        self.assertEqual(sorted(registry["k1:7125"]), ["N9.gcode"])
+
+    def test_printer_mode_defaults_to_folder(self):
+        self.assertEqual(self.history.printer_mode("k1:7125"), "folder")
+        self.history.set_printer_mode("k1:7125", "prefix")
+        self.assertEqual(self.history.printer_mode("k1:7125"), "prefix")
+        self.history.printer_files("k1:7125", "folder", BASE)
+        self.assertEqual(self.history.printer_mode("k1:7125"), "folder")
+
+
 if __name__ == "__main__":
     unittest.main()

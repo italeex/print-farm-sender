@@ -1,6 +1,6 @@
 # projectmem - printer-farm-sender
 
-_Last updated: 2026-10-26_
+_Last updated: 2026-10-29_
 
 ## Project purpose
 Десктопное приложение (Python 3.13 + Tkinter, стандартная библиотека + `requests`) для одновременной рассылки одного или нескольких `.gcode` файлов на другие принтеры Creality…
@@ -11,19 +11,19 @@ _Last updated: 2026-10-26_
 - [DONE] #legacy_7b6e Legacy issue: fix: harden config loading, throttle progress, and clean send shutdown -> fix: harden config loading, throttle progress, and clean send shutdown (fixed)
 
 ## Decisions
-- No decisions logged yet.
+- Refactor: refactor: move plan calendar into a tab [web/app.js]
 
 ## Notes
-- docs: design spec and implementation plan
-- feat: config, printer model, seeding from deviceInfo.json, file validation
-- feat: printer probes and Moonraker upload with progress and cancel
-- feat: parallel multi-file batch sender with event callbacks
-- feat: tkinter UI for parallel printer farm uploads
-- feat: double-click launcher Р—Р°РїСѓСЃС‚РёС‚СЊ.bat without console window
-- docs: README with usage and v1 limitations
-- docs: dashboard design and implementation plan
-- docs: clarify monitor and test interfaces in plan
-- New feature: feat: mainsail settings and print control api [farm_core.py]
+- New feature: feat: count in-progress parts in plan facts [farm_history.py]
+- New feature: feat: add QC shift report to history store [farm_history.py]
+- New feature: feat: expose QC report endpoints [farm_server.py]
+- New feature: feat: add tab navigation shell [web/app.js]
+- New feature: feat: show completed and in-progress plan progress [web/app.js]
+- New feature: feat: add start-now recommendation block [web/app.js]
+- New feature: feat: add QC report dialog [web/app.js]
+- New feature: feat: plan progress in positions not pieces [web/app.js]
+- New feature: feat: add part catalog with numbers [farm_history.py]
+- New feature: feat: add farm file operations [farm_files.py]
 
 ## Key files
 - `.gitignore`
@@ -38,6 +38,14 @@ _Last updated: 2026-10-26_
 - `README.md`
 - `docs/superpowers/plans/2026-10-26-farm-dashboard.md`
 - `docs/superpowers/specs/2026-10-26-farm-dashboard-design.md`
+- `farm_errors.py`
+- `tests/test_errors.py`
+- `farm_thumbs.py`
+- `tests/test_thumbs.py`
+- `farm_monitor.py`
+- `tests/test_monitor.py`
+- `tests/fake_moonraker.py`
+- `farm_jobs.py`
 
 ## Open questions
 - None logged yet.

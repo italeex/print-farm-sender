@@ -1,8 +1,9 @@
 import base64
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 DEFAULT_STATUS = {
     "print_stats": {"state": "printing", "filename": "деталь 7.gcode", "print_duration": 100},
@@ -31,7 +32,7 @@ def gcode_with_parts(names):
 
 
 class FakeMoonraker:
-    def __init__(self, *, info=None, objects=UNSET, thumb=None, thumb_status=206, log_tail="", failures=0, parts=None):
+    def __init__(self, *, info=None, objects=UNSET, thumb=None, thumb_status=206, log_tail="", failures=0, parts=None, folder_broken=False, upload_status=0):
         self.info = info or {"state": "ready", "state_message": "Printer is ready"}
         self.objects = DEFAULT_STATUS if objects is UNSET else objects
         self.thumb = thumb
@@ -39,6 +40,9 @@ class FakeMoonraker:
         self.log_tail = log_tail
         self.failures = failures
         self.parts = parts or []
+        self.folder_broken = folder_broken
+        self.upload_status = upload_status
+        self.store = {}
         self.requests = []
         self.port = 0
         self._served_failures = 0
@@ -71,7 +75,28 @@ class FakeMoonraker:
                     self.wfile.write(body)
 
             def do_GET(self):
+                raw = urlsplit(self.path)
                 path = self._record()
+                query = parse_qs(raw.query)
+                if path == "/server/files/directory":
+                    if fake.folder_broken or query.get("path", [""])[0] != "gcodes/FARM":
+                        self._send_json({"error": {"message": "Directory does not exist"}}, status=400)
+                        return
+                    files = [
+                        {"filename": key.split("/", 1)[1], "size": len(data), "modified": 100.0}
+                        for key, data in fake.store.items()
+                        if key.startswith("FARM/")
+                    ]
+                    self._send_json({"result": {"dirs": [], "files": files, "root_info": {}}})
+                    return
+                if path == "/server/files/list":
+                    files = [
+                        {"path": key, "size": len(data), "modified": 100.0}
+                        for key, data in fake.store.items()
+                        if "/" not in key
+                    ]
+                    self._send_json({"result": files})
+                    return
                 if path == "/printer/info":
                     if fake._served_failures < fake.failures:
                         fake._served_failures += 1
@@ -105,10 +130,39 @@ class FakeMoonraker:
             def do_POST(self):
                 path = self._record()
                 length = int(self.headers.get("Content-Length") or 0)
-                if length:
-                    self.rfile.read(length)
+                body = self.rfile.read(length) if length else b""
+                if path == "/server/files/upload":
+                    if fake.upload_status:
+                        self._send_json({"error": {"message": "boom"}}, status=fake.upload_status)
+                        return
+                    text = body.decode("latin-1")
+                    match = re.search(r'name="path"\r\n\r\n([^\r]+)', text)
+                    fnames = re.findall(r'filename="([^"]+)"', text)
+                    filename = fnames[-1] if fnames else "unknown"
+                    if match:
+                        if fake.folder_broken:
+                            self._send_json({"error": {"message": "Directory does not exist"}}, status=400)
+                            return
+                        key = f"{match.group(1).strip()}/{filename}"
+                    else:
+                        key = filename
+                    fake.store[key] = b"data"
+                    self._send_json({"result": {"item": {"path": key}}}, status=201)
+                    return
                 if path.startswith("/printer/print/"):
                     self._send_json({"result": "ok"})
+                    return
+                self.send_error(404)
+
+            def do_DELETE(self):
+                path = self._record()
+                if path.startswith("/server/files/gcodes/"):
+                    key = unquote(path[len("/server/files/gcodes/"):])
+                    if key in fake.store:
+                        del fake.store[key]
+                        self._send_json({"result": "ok"})
+                    else:
+                        self._send_json({"error": {"message": "not found"}}, status=404)
                     return
                 self.send_error(404)
 

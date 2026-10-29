@@ -38,6 +38,15 @@ from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore, _iso_day, qc_
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
+from farm_files import (
+    FARM_DIR,
+    FARM_PREFIX,
+    FarmFileError,
+    delete_from_farm,
+    list_farm,
+    remote_name,
+    upload_to_farm,
+)
 from farm_plan import PLAN_SUFFIXES, parse_plan_file, part_key, split_code_name
 from farm_thumbs import ThumbCache, thumbnail_from_file
 
@@ -62,6 +71,7 @@ HISTORY_SEGMENT_LIMIT = 2000
 DAY_SECONDS = 86400.0
 APP_VERSION = "2.9.0"
 CONFIG_LOCK = threading.RLock()
+FILES_LOCK = threading.RLock()
 BROWSE_LOCK = threading.Lock()
 SCAN_LOCK = threading.Lock()
 DIALOG_SCRIPT = """
@@ -379,7 +389,7 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._api_qc_csv(query)
             return
         if path == "/api/catalog":
-            self._send_json({"items": self.app.history.catalog()})
+            self._api_catalog_get(query)
             return
         if path.startswith("/api/history/"):
             self._api_history(path[len("/api/history/"):], query)
@@ -439,6 +449,15 @@ class FarmHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/catalog":
             self._api_catalog()
+            return
+        if path == "/api/files/sync":
+            self._api_files_sync()
+            return
+        if path == "/api/files/upload":
+            self._api_files_upload()
+            return
+        if path == "/api/files/delete":
+            self._api_files_delete()
             return
         if path.startswith("/api/print/"):
             self._api_print(path[len("/api/print/"):])
@@ -576,6 +595,271 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._send_error(400, str(exc) or "Некорректные данные каталога")
             return
         self._send_json({"ok": True, "item": item})
+
+    def _api_catalog_get(self, query) -> None:
+        items = self.app.history.catalog()
+        if self._query_text(query, "sync") != "1":
+            self._send_json({"items": items})
+            return
+        self._send_json({"items": items, "statuses": self._catalog_statuses()})
+
+    def _file_views(self) -> dict:
+        try:
+            views = self.app.monitor.snapshot().get("printers") or []
+        except Exception:
+            return {}
+        result = {}
+        for view in views:
+            if isinstance(view, dict) and view.get("key"):
+                result[str(view.get("key"))] = view
+        return result
+
+    @staticmethod
+    def _is_printing_remote(current: str, remote: str) -> bool:
+        if not current or not remote:
+            return False
+        base = current.replace("\\", "/").split("/")[-1]
+        return (
+            base == remote
+            or current == remote
+            or base == FARM_PREFIX + remote
+            or current == FARM_DIR + "/" + remote
+        )
+
+    def _catalog_statuses(self) -> dict:
+        catalog = self.app.history.catalog_map()
+        stored = self.app.history.registry()
+        views = self._file_views()
+        result = {}
+        for printer in self.app.config.printers:
+            key = printer.key
+            current = str((views.get(key) or {}).get("file") or "")
+            files = stored.get(key, {})
+            per = {}
+            for part_key, item in catalog.items():
+                number = item.get("number") if isinstance(item, dict) else None
+                if number is None:
+                    continue
+                try:
+                    remote = remote_name(int(number))
+                except (TypeError, ValueError):
+                    continue
+                if self._is_printing_remote(current, remote):
+                    per[part_key] = "printing"
+                    continue
+                entry = files.get(remote)
+                if entry is None:
+                    per[part_key] = "missing"
+                    continue
+                ref_size = item.get("file_size")
+                try:
+                    ref_size = int(ref_size) if ref_size is not None else None
+                except (TypeError, ValueError):
+                    ref_size = None
+                try:
+                    actual = int((entry or {}).get("size") or 0)
+                except (TypeError, ValueError):
+                    actual = 0
+                if ref_size is not None and actual != ref_size:
+                    per[part_key] = "stale"
+                    continue
+                per[part_key] = "ok"
+            result[key] = per
+        return result
+
+    def _api_files_sync(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw = payload.get("printers")
+        if raw is None:
+            keys = [printer.key for printer in self.app.config.printers]
+        elif isinstance(raw, list):
+            keys = []
+            for item in raw:
+                if not isinstance(item, str) or not item.strip():
+                    self._send_error(400, "Ожидался список printers")
+                    return
+                if item.strip() not in keys:
+                    keys.append(item.strip())
+        else:
+            self._send_error(400, "Ожидался список printers")
+            return
+        known = {printer.key: printer for printer in self.app.config.printers}
+        result = {}
+        for key in keys:
+            printer = known.get(key)
+            if printer is None:
+                result[key] = {"ok": False, "error": f"Принтер не найден: {key}", "files": []}
+                continue
+            mode = self.app.history.printer_mode(key)
+            try:
+                files = list_farm(printer, mode)
+            except FarmFileError as exc:
+                result[key] = {"ok": False, "error": str(exc), "files": []}
+                continue
+            except Exception as exc:
+                result[key] = {
+                    "ok": False,
+                    "error": str(exc) or "Не удалось получить список файлов",
+                    "files": [],
+                }
+                continue
+            now = time.time()
+            entries = [
+                {
+                    "name": str(item.get("name") or ""),
+                    "size": item.get("size") or 0,
+                    "modified": item.get("modified") or 0.0,
+                    "seen_at": now,
+                }
+                for item in files
+                if isinstance(item, dict) and item.get("name")
+            ]
+            with FILES_LOCK:
+                self.app.history.set_registry(key, entries)
+                self.app.history.printer_files(key, mode, now)
+            result[key] = {"ok": True, "files": files if isinstance(files, list) else []}
+        self._send_json({"printers": result})
+
+    def _file_action_targets(self, payload: dict):
+        raw_parts = payload.get("parts")
+        raw_printers = payload.get("printers")
+        if not isinstance(raw_parts, list) or not raw_parts:
+            self._send_error(400, "Ожидался непустой список parts")
+            return None
+        if not isinstance(raw_printers, list) or not raw_printers:
+            self._send_error(400, "Ожидался непустой список printers")
+            return None
+        parts = []
+        for item in raw_parts:
+            if not isinstance(item, str) or not item.strip():
+                self._send_error(400, "Ожидался непустой список parts")
+                return None
+            if item.strip() not in parts:
+                parts.append(item.strip())
+        keys = []
+        for item in raw_printers:
+            if not isinstance(item, str) or not item.strip():
+                self._send_error(400, "Ожидался непустой список printers")
+                return None
+            if item.strip() not in keys:
+                keys.append(item.strip())
+        return parts, keys
+
+    def _run_file_action(self, kind: str, parts: list, keys: list) -> list:
+        catalog = self.app.history.catalog_map()
+        views = self._file_views()
+        known = {printer.key: printer for printer in self.app.config.printers}
+        rows = []
+        for key in keys:
+            printer = known.get(key)
+            for part in parts:
+                if printer is None:
+                    rows.append(
+                        {"printer": key, "part": part, "ok": False, "error": f"Принтер не найден: {key}"}
+                    )
+                    continue
+                item = catalog.get(part)
+                number = item.get("number") if isinstance(item, dict) else None
+                if number is None:
+                    rows.append(
+                        {"printer": key, "part": part, "ok": False, "error": f"Нет эталона для детали {part}"}
+                    )
+                    continue
+                try:
+                    remote = remote_name(int(number))
+                except (TypeError, ValueError):
+                    rows.append(
+                        {"printer": key, "part": part, "ok": False, "error": f"Нет эталона для детали {part}"}
+                    )
+                    continue
+                current = str((views.get(key) or {}).get("file") or "")
+                if self._is_printing_remote(current, remote):
+                    rows.append(
+                        {"printer": key, "part": part, "ok": False, "error": f"Файл {remote} сейчас печатается"}
+                    )
+                    continue
+                if kind == "upload":
+                    rows.append(self._upload_one(printer, key, part, item, remote))
+                else:
+                    rows.append(self._delete_one(printer, key, part, remote))
+        return rows
+
+    def _upload_one(self, printer, key: str, part: str, item: dict, remote: str) -> dict:
+        local = item.get("file_path") if isinstance(item, dict) else None
+        if not local:
+            return {"printer": key, "part": part, "ok": False, "error": f"Нет локального файла для детали {part}"}
+        target = Path(str(local))
+        try:
+            exists = target.is_file()
+        except OSError:
+            exists = False
+        if not exists:
+            return {"printer": key, "part": part, "ok": False, "error": f"Файл не найден: {local}"}
+        mode = self.app.history.printer_mode(key)
+        try:
+            used = upload_to_farm(printer, target, remote, mode)
+        except FarmFileError as exc:
+            return {"printer": key, "part": part, "ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {
+                "printer": key,
+                "part": part,
+                "ok": False,
+                "error": str(exc) or f"Не удалось загрузить файл {remote}",
+            }
+        try:
+            stat = target.stat()
+            size, modified = stat.st_size, stat.st_mtime
+        except OSError:
+            size, modified = 0, 0.0
+        now = time.time()
+        with FILES_LOCK:
+            self.app.history.printer_files(key, used, now)
+            self.app.history.file_registry(key, remote, size, modified, now)
+        return {"printer": key, "part": part, "ok": True}
+
+    def _delete_one(self, printer, key: str, part: str, remote: str) -> dict:
+        mode = self.app.history.printer_mode(key)
+        try:
+            delete_from_farm(printer, [remote], mode)
+        except FarmFileError as exc:
+            return {"printer": key, "part": part, "ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {
+                "printer": key,
+                "part": part,
+                "ok": False,
+                "error": str(exc) or f"Не удалось удалить файл {remote}",
+            }
+        now = time.time()
+        with FILES_LOCK:
+            current = self.app.history.registry().get(key, {})
+            current.pop(remote, None)
+            self.app.history.set_registry(key, list(current.values()))
+            self.app.history.printer_files(key, mode, now)
+        return {"printer": key, "part": part, "ok": True}
+
+    def _api_files_upload(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        targets = self._file_action_targets(payload)
+        if targets is None:
+            return
+        parts, keys = targets
+        self._send_json({"results": self._run_file_action("upload", parts, keys)})
+
+    def _api_files_delete(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        targets = self._file_action_targets(payload)
+        if targets is None:
+            return
+        parts, keys = targets
+        self._send_json({"results": self._run_file_action("delete", parts, keys)})
 
     def _live_parts(self) -> list[dict]:
         parts: dict[str, dict] = {}
