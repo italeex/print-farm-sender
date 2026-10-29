@@ -2585,7 +2585,7 @@ function renderShift() {
     }
   }
   if (shiftPrintersEmptyEl) shiftPrintersEmptyEl.hidden = closed || tasks.length > 0 || emptyPlan;
-  const hasUnscheduled = !closed && unscheduled.length > 0;
+  const hasUnscheduled = unscheduled.length > 0;
   if (shiftUnscheduledWrapEl) shiftUnscheduledWrapEl.hidden = !hasUnscheduled;
   if (shiftUnscheduledTitleEl) shiftUnscheduledTitleEl.hidden = !hasUnscheduled;
   if (shiftUnscheduledEl) shiftUnscheduledEl.hidden = !hasUnscheduled;
