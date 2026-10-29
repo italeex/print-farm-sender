@@ -837,6 +837,64 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertIn("занят", str(caught.exception))
         self.assertNotIn("zzz-new", self.history.catalog_map())
 
+    def test_catalog_seed_retries_number_clash(self):
+        printing = make_view("printing", "a.gcode", [{"name": "ДетальА", "count": 1}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "a.gcode"), printing, BASE + 60)
+        real_conn = self.history._conn
+        attempts = []
+
+        class Flaky:
+            def execute(self, sql, *args):
+                if (
+                    isinstance(sql, str)
+                    and sql.startswith("INSERT INTO parts_catalog")
+                    and not attempts
+                ):
+                    attempts.append(1)
+                    raise sqlite3.IntegrityError("UNIQUE constraint failed: parts_catalog.number")
+                return real_conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        self.history._conn = Flaky()
+        try:
+            items = self.history.catalog()
+        finally:
+            self.history._conn = real_conn
+        self.assertEqual(attempts, [1])
+        self.assertEqual([(item["part_key"], item["number"]) for item in items], [("ДЕТАЛЬА", 1)])
+        mark = self.history._conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_events_id'"
+        ).fetchone()
+        self.assertGreater(int(mark[0]), 0)
+
+    def test_set_catalog_lookup_does_not_scan_events(self):
+        printing = make_view("printing", "a.gcode", [{"name": "ДетальА", "count": 1}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "a.gcode"), printing, BASE + 60)
+        real_conn = self.history._conn
+        scans = []
+
+        class Counting:
+            def execute(self, sql, *args):
+                if isinstance(sql, str) and "parts_json" in sql and "id >" not in sql:
+                    scans.append(sql)
+                return real_conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        self.history._conn = Counting()
+        try:
+            item = self.history.set_catalog("zzz-unknown")
+        finally:
+            self.history._conn = real_conn
+        self.assertEqual(scans, [])
+        self.assertEqual(item["code"], "")
+        self.assertEqual(item["name"], "")
+
     def test_events_event_ts_index(self):
         names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
         self.assertIn("events_event_ts", names)

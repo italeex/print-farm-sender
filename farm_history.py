@@ -938,23 +938,31 @@ class HistoryStore:
             return 0
 
     def _insert_catalog_missing_locked(self, known: dict[str, tuple[str, str]]) -> None:
-        existing = {
+        present = {
             str(row[0]) for row in self._conn.execute("SELECT part_key FROM parts_catalog")
         }
-        missing = sorted(key for key in known if key not in existing)
+        missing = sorted(key for key in known if key not in present)
         if missing:
-            current = self._next_number_locked()
             moment = self._clock()
             for key in missing:
                 code, name = known[key]
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO parts_catalog (part_key, number, code, name, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (key, current, code, name, moment),
-                )
-                current += 1
+                while True:
+                    try:
+                        self._conn.execute(
+                            "INSERT INTO parts_catalog (part_key, number, code, name, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (key, self._next_number_locked(), code, name, moment),
+                        )
+                        break
+                    except sqlite3.IntegrityError:
+                        taken = {
+                            str(row[0])
+                            for row in self._conn.execute("SELECT part_key FROM parts_catalog")
+                        }
+                        if key in taken:
+                            break
         for key, (code, name) in known.items():
-            if key not in existing:
+            if key not in present:
                 continue
             self._conn.execute(
                 "UPDATE parts_catalog SET code = CASE WHEN COALESCE(code, '') = '' THEN ? ELSE code END, "
@@ -976,28 +984,15 @@ class HistoryStore:
 
     def _lookup_part_names_locked(self, key: str) -> tuple[str, str]:
         row = self._conn.execute(
+            "SELECT code, name FROM parts_catalog WHERE part_key = ?", (key,)
+        ).fetchone()
+        if row is not None:
+            return str(row["code"] or ""), str(row["name"] or "")
+        row = self._conn.execute(
             "SELECT code, name FROM plan_items WHERE part_key = ? LIMIT 1", (key,)
         ).fetchone()
         if row is not None:
             return str(row["code"] or ""), str(row["name"] or "")
-        try:
-            event_rows = self._conn.execute(
-                "SELECT parts_json FROM events WHERE event = 'complete' AND parts_json IS NOT NULL"
-            ).fetchall()
-        except sqlite3.Error:
-            return "", ""
-        for event_row in event_rows:
-            try:
-                parts = json.loads(event_row["parts_json"] or "[]")
-            except ValueError:
-                continue
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                if part_key(part.get("name") or "") == key:
-                    return split_code_name(part.get("name") or "")
         return "", ""
 
     def _catalog_numbers_locked(self) -> dict[str, int | None]:
