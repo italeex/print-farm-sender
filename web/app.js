@@ -12,7 +12,7 @@ const COMPACT_KEY = "farm.compact";
 const GROUPED_KEY = "farm.grouped";
 const CAMERA_PORT = 8000;
 const DEFAULT_HELP_URL = "https://wiki.creality.com/en/k2-flagship-series/k2-plus/error-code-summary";
-const EXPECTED_SERVER_VERSION = "2.10.0";
+const EXPECTED_SERVER_VERSION = "2.11.0";
 const STATE_LABELS = {
   printing: "Печатает",
   paused: "Пауза",
@@ -2560,7 +2560,17 @@ function renderShift() {
       setText(shiftEmptyEl, "Смена закрыта, следующий запуск завтра в 09:00");
       shiftEmptyEl.hidden = false;
     } else if (emptyPlan) {
-      setText(shiftEmptyEl, "Импортируйте план");
+      const dayItems =
+        typeof planData !== "undefined" && planData && planData.day && Array.isArray(planData.day.items)
+          ? planData.day.items
+          : [];
+      const hasPlan = dayItems.some(function (entry) {
+        return entry && Number(entry.target) > 0;
+      });
+      setText(
+        shiftEmptyEl,
+        hasPlan ? "Нет деталей с эталоном — задайте файлы на вкладке Файлы" : "Импортируйте план"
+      );
       shiftEmptyEl.hidden = false;
     } else {
       shiftEmptyEl.hidden = true;
