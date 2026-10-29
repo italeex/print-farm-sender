@@ -1358,6 +1358,60 @@ class ApiTests(unittest.TestCase):
             lines,
         )
 
+    def test_api_catalog_get_lists_items(self):
+        self.history.import_plan(
+            [{"date": "2026-10-29", "key": "a", "code": "A", "name": "A", "target": 2}]
+        )
+        self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        response = requests.get(self.url("/api/catalog"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["items"]
+        by_key = {item["part_key"]: item for item in items}
+        self.assertEqual(by_key["a"]["number"], 1)
+        self.assertEqual(by_key["ГР3.01.42000.01"]["code"], "МВСЛ.ГР3.01.42000.01")
+        self.assertEqual(by_key["ГР3.01.42000.01"]["number"], 2)
+
+    def test_api_catalog_post_sets_number(self):
+        self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        key = requests.get(self.url("/api/qc?date=2026-10-29"), timeout=3).json()["items"][0]["part_key"]
+        response = requests.post(self.url("/api/catalog"), json={"part_key": key, "number": 5}, timeout=3)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["number"], 5)
+        items = requests.get(self.url("/api/catalog"), timeout=3).json()["items"]
+        self.assertEqual([item for item in items if item["part_key"] == key][0]["number"], 5)
+
+    def test_api_catalog_post_sets_reference_file(self):
+        response = requests.post(
+            self.url("/api/catalog"),
+            json={"part_key": "a", "file_path": str(self.gcode)},
+            timeout=3,
+        )
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["item"]
+        self.assertEqual(item["file_path"], str(self.gcode))
+        self.assertGreater(item["file_size"], 0)
+
+    def test_api_catalog_post_rejects_bad_number(self):
+        for number in (0, -2, 2.5, "7"):
+            response = requests.post(
+                self.url("/api/catalog"), json={"part_key": "a", "number": number}, timeout=3
+            )
+            self.assertEqual(response.status_code, 400, number)
+            self.assertIn("Номер", response.json()["error"])
+
+    def test_api_catalog_post_rejects_missing_file(self):
+        missing = str(Path(self.tmp.name) / "нет.gcode")
+        response = requests.post(
+            self.url("/api/catalog"), json={"part_key": "a", "file_path": missing}, timeout=3
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Файл не найден", response.json()["error"])
+
+    def test_api_catalog_post_rejects_empty_key(self):
+        response = requests.post(self.url("/api/catalog"), json={"part_key": "  "}, timeout=3)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("part_key", response.json()["error"])
+
     def test_api_qc_csv_rejects_bad_date(self):
         response = requests.get(self.url("/api/qc.csv?date=нет"), timeout=3)
         self.assertEqual(response.status_code, 400)

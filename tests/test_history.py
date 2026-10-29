@@ -727,6 +727,116 @@ class HistoryStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.history.set_catalog("b", number=1)
 
+    def test_catalog_seeds_from_completed_events(self):
+        printing = make_view("printing", "a.gcode", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 2}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "a.gcode"), printing, BASE + 60)
+        items = self.history.catalog()
+        self.assertEqual([item["part_key"] for item in items], ["ГР3.01.42000.01"])
+        self.assertEqual(items[0]["number"], 1)
+        self.assertEqual(items[0]["code"], "МВСЛ.ГР3.01.42000.01")
+        self.assertEqual(items[0]["name"], "Крышка")
+
+    def test_catalog_ignores_malformed_parts_json(self):
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'a.gcode', 1, 'not-json{')",
+            (KEY, BASE),
+        )
+        self.history._conn.commit()
+        self.assertEqual(self.history.catalog(), [])
+
+    def test_catalog_event_seeding_is_incremental(self):
+        printing = make_view("printing", "a.gcode", [{"name": "ДетальА", "count": 1}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "a.gcode"), printing, BASE + 60)
+        self.history.catalog()
+        mark = self.history._conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_events_id'"
+        ).fetchone()
+        self.assertIsNotNone(mark)
+        first = int(mark[0])
+        self.assertGreater(first, 0)
+        other = make_view("printing", "b.gcode", [{"name": "ДетальБ", "count": 1}])
+        self.record(other, None, BASE + 120)
+        self.record(make_view("idle", "b.gcode"), other, BASE + 180)
+        items = self.history.catalog()
+        self.assertEqual(
+            [(item["part_key"], item["number"]) for item in items],
+            [("ДЕТАЛЬА", 1), ("ДЕТАЛЬБ", 2)],
+        )
+        mark = self.history._conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_events_id'"
+        ).fetchone()
+        self.assertGreater(int(mark[0]), first)
+
+    def test_plan_and_qc_do_not_scan_events(self):
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'a.gcode', 1, ?)",
+            (KEY, BASE, json.dumps([{"name": "ДетальА", "count": 1}], ensure_ascii=False)),
+        )
+        self.history._conn.commit()
+        self.history.plan(now=BASE + 60)
+        self.history.qc(datetime.fromtimestamp(BASE + 60).date().isoformat())
+        mark = self.history._conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_events_id'"
+        ).fetchone()
+        self.assertIsNone(mark)
+        self.assertEqual(self.history.catalog_map(), {})
+        items = self.history.catalog()
+        self.assertEqual([(item["part_key"], item["number"]) for item in items], [("ДЕТАЛЬА", 1)])
+
+    def test_catalog_map_is_read_only(self):
+        self.history.import_plan(
+            [{"date": "2026-10-29", "key": "a", "code": "A", "name": "A", "target": 1}]
+        )
+        printing = make_view("printing", "b.gcode", [{"name": "ДетальБ", "count": 1}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "b.gcode"), printing, BASE + 60)
+        before = self.history.catalog_map()
+        self.assertEqual(before, {})
+        items = self.history.catalog()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(self.history.catalog_map(), {item["part_key"]: item for item in items})
+
+    def test_plan_and_qc_expose_catalog_numbers(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10}]
+        )
+        moment = (datetime.fromisoformat(day) - timedelta(hours=1)).timestamp()
+        printing = make_view("printing", "a.gcode", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        self.record(printing, None, moment)
+        self.record(make_view("idle", "a.gcode"), printing, moment + 60)
+        noon = (datetime.fromisoformat(day) + timedelta(hours=12)).timestamp()
+        plan = self.history.plan(now=noon)["day"]
+        self.assertEqual(plan["items"][0]["number"], 1)
+        report = self.history.qc(day)
+        self.assertEqual(report["items"][0]["number"], 1)
+        self.assertEqual(report["items"][0]["count"], 4)
+
+    def test_set_catalog_duplicate_number_rolls_back_clean(self):
+        real_conn = self.history._conn
+
+        class FailInsert:
+            def execute(self, sql, *args):
+                if isinstance(sql, str) and sql.startswith("INSERT INTO parts_catalog"):
+                    raise sqlite3.IntegrityError("UNIQUE constraint failed: parts_catalog.number")
+                return real_conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        self.history._conn = FailInsert()
+        try:
+            with self.assertRaises(ValueError) as caught:
+                self.history.set_catalog("zzz-new", number=9)
+        finally:
+            self.history._conn = real_conn
+        self.assertIn("занят", str(caught.exception))
+        self.assertNotIn("zzz-new", self.history.catalog_map())
+
     def test_events_event_ts_index(self):
         names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
         self.assertIn("events_event_ts", names)

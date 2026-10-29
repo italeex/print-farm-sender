@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS parts_catalog (
     updated_at REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number ON parts_catalog(number) WHERE number IS NOT NULL;
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -721,7 +725,10 @@ class HistoryStore:
 
     def catalog(self) -> list[dict]:
         with self._lock:
-            self._ensure_catalog_locked()
+            self._ensure_catalog_schema_locked()
+            self._seed_catalog_plans_locked()
+            self._seed_catalog_events_locked()
+            self._conn.commit()
             rows = self._conn.execute(
                 "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
                 "FROM parts_catalog "
@@ -731,10 +738,13 @@ class HistoryStore:
 
     def catalog_map(self) -> dict[str, dict]:
         with self._lock:
-            self._ensure_catalog_locked()
-            rows = self._conn.execute(
-                "SELECT part_key, number, code, name, file_path, file_size, file_mtime FROM parts_catalog"
-            ).fetchall()
+            self._ensure_catalog_schema_locked()
+            try:
+                rows = self._conn.execute(
+                    "SELECT part_key, number, code, name, file_path, file_size, file_mtime FROM parts_catalog"
+                ).fetchall()
+            except sqlite3.Error:
+                return {}
         return {str(row["part_key"]): self._catalog_row(row) for row in rows}
 
     def set_catalog(self, part_key, number=None, file_path=None) -> dict:
@@ -763,7 +773,10 @@ class HistoryStore:
                 file_size = stat.st_size
                 file_mtime = stat.st_mtime
         with self._lock:
-            self._ensure_catalog_locked()
+            self._ensure_catalog_schema_locked()
+            self._seed_catalog_plans_locked()
+            self._seed_catalog_events_locked()
+            self._conn.commit()
             if number is not None:
                 clash = self._conn.execute(
                     "SELECT part_key FROM parts_catalog WHERE number = ? AND part_key <> ?",
@@ -776,33 +789,37 @@ class HistoryStore:
                 "FROM parts_catalog WHERE part_key = ?",
                 (key,),
             ).fetchone()
-            if row is None:
-                code, name = self._lookup_part_names_locked(key)
-                assigned = number
-                if assigned is None:
-                    assigned = self._next_number_locked()
-                self._conn.execute(
-                    "INSERT INTO parts_catalog (part_key, number, code, name, file_path, file_size, "
-                    "file_mtime, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (key, assigned, code, name, file_value, file_size, file_mtime, self._clock()),
-                )
-            else:
-                assigned = number if number is not None else row["number"]
-                if assigned is not None:
-                    try:
-                        assigned = int(assigned)
-                    except (TypeError, ValueError):
-                        assigned = None
-                if file_path is None:
-                    file_value = row["file_path"]
-                    file_size = row["file_size"]
-                    file_mtime = row["file_mtime"]
-                self._conn.execute(
-                    "UPDATE parts_catalog SET number = ?, file_path = ?, file_size = ?, "
-                    "file_mtime = ?, updated_at = ? WHERE part_key = ?",
-                    (assigned, file_value, file_size, file_mtime, self._clock(), key),
-                )
-            self._conn.commit()
+            try:
+                if row is None:
+                    code, name = self._lookup_part_names_locked(key)
+                    assigned = number
+                    if assigned is None:
+                        assigned = self._next_number_locked()
+                    self._conn.execute(
+                        "INSERT INTO parts_catalog (part_key, number, code, name, file_path, file_size, "
+                        "file_mtime, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (key, assigned, code, name, file_value, file_size, file_mtime, self._clock()),
+                    )
+                else:
+                    assigned = number if number is not None else row["number"]
+                    if assigned is not None:
+                        try:
+                            assigned = int(assigned)
+                        except (TypeError, ValueError):
+                            assigned = None
+                    if file_path is None:
+                        file_value = row["file_path"]
+                        file_size = row["file_size"]
+                        file_mtime = row["file_mtime"]
+                    self._conn.execute(
+                        "UPDATE parts_catalog SET number = ?, file_path = ?, file_size = ?, "
+                        "file_mtime = ?, updated_at = ? WHERE part_key = ?",
+                        (assigned, file_value, file_size, file_mtime, self._clock(), key),
+                    )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                raise ValueError(f"Номер {assigned} уже занят") from None
             fresh = self._conn.execute(
                 "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
                 "FROM parts_catalog WHERE part_key = ?",
@@ -834,7 +851,7 @@ class HistoryStore:
             "file_mtime": mtime,
         }
 
-    def _ensure_catalog_locked(self) -> None:
+    def _ensure_catalog_schema_locked(self) -> None:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS parts_catalog ("
             "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
@@ -856,34 +873,71 @@ class HistoryStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number "
             "ON parts_catalog(number) WHERE number IS NOT NULL"
         )
+        self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+
+    def _seed_catalog_plans_locked(self) -> None:
         known: dict[str, tuple[str, str]] = {}
         for row in self._conn.execute("SELECT DISTINCT part_key, code, name FROM plan_items"):
             key = str(row["part_key"] or "").strip()
             if key and key not in known:
                 known[key] = (str(row["code"] or ""), str(row["name"] or ""))
+        if known:
+            self._insert_catalog_missing_locked(known)
+
+    def _seed_catalog_events_locked(self) -> None:
         try:
-            event_rows = self._conn.execute(
-                "SELECT parts_json FROM events WHERE event = 'complete' AND parts_json IS NOT NULL"
+            last = self._catalog_event_mark_locked()
+            rows = self._conn.execute(
+                "SELECT id, parts_json FROM events "
+                "WHERE event = 'complete' AND parts_json IS NOT NULL AND id > ? ORDER BY id",
+                (last,),
             ).fetchall()
         except sqlite3.Error:
-            event_rows = []
-        for row in event_rows:
-            try:
-                parts = json.loads(row["parts_json"] or "[]")
-            except ValueError:
-                continue
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                key = part_key(part.get("name") or "")
-                if not key or key in known:
-                    continue
-                code, name = split_code_name(part.get("name") or "")
-                known[key] = (code, name)
-        if not known:
             return
+        if rows:
+            known: dict[str, tuple[str, str]] = {}
+            for row in rows:
+                try:
+                    parts = json.loads(row["parts_json"] or "[]")
+                except ValueError:
+                    continue
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    key = part_key(part.get("name") or "")
+                    if not key or key in known:
+                        continue
+                    code, name = split_code_name(part.get("name") or "")
+                    known[key] = (code, name)
+            if known:
+                self._insert_catalog_missing_locked(known)
+            try:
+                top = max(int(row["id"]) for row in rows)
+            except (TypeError, ValueError):
+                top = last
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('catalog_events_id', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(max(top, last)),),
+            )
+
+    def _catalog_event_mark_locked(self) -> int:
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'catalog_events_id'"
+            ).fetchone()
+        except sqlite3.Error:
+            return 0
+        if row is None:
+            return 0
+        try:
+            return max(int(row[0]), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _insert_catalog_missing_locked(self, known: dict[str, tuple[str, str]]) -> None:
         existing = {
             str(row[0]) for row in self._conn.execute("SELECT part_key FROM parts_catalog")
         }
@@ -908,7 +962,6 @@ class HistoryStore:
                 "WHERE part_key = ?",
                 (code, name, key),
             )
-        self._conn.commit()
 
     def _next_number_locked(self) -> int:
         try:
@@ -949,7 +1002,9 @@ class HistoryStore:
 
     def _catalog_numbers_locked(self) -> dict[str, int | None]:
         try:
-            self._ensure_catalog_locked()
+            self._ensure_catalog_schema_locked()
+            self._seed_catalog_plans_locked()
+            self._conn.commit()
         except sqlite3.Error:
             return {}
         try:
