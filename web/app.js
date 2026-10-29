@@ -3108,21 +3108,43 @@ function renderPlanTable(items) {
   setText(document.getElementById("plan-parts-badge"), items.length);
 }
 
+function planPositionCounts(items) {
+  let total = 0;
+  let done = 0;
+  let live = 0;
+  const list = Array.isArray(items) ? items : [];
+  for (const item of list) {
+    if (!item) continue;
+    const target = Number(item.target) || 0;
+    if (!(target > 0)) continue;
+    total += 1;
+    const actual = Number(item.actual) || 0;
+    if (actual >= target) {
+      done += 1;
+      continue;
+    }
+    if (planInProgress(item.in_progress) > 0) live += 1;
+  }
+  return { total: total, done: done, live: live };
+}
+
+function planPositionLabel(counts) {
+  const total = counts ? counts.total : 0;
+  const done = counts ? counts.done : 0;
+  const live = counts ? counts.live : 0;
+  if (live > 0) return done + " (+" + live + ") / " + total;
+  return done + " / " + total;
+}
+
 function renderPlanSelection() {
   if (!planSelectionTitleEl) return;
   let title = "—";
-  let target = 0;
-  let actual = 0;
-  let inProgress = 0;
   let items = [];
   if (planCalendar && planSelection) {
     if (planSelection.kind === "week") {
       const info = planWeekInfo(planSelection.start);
       if (info) {
         title = "Неделя " + info.week + " · " + planLongRange(info.start, info.end);
-        target = info.target;
-        actual = info.actual;
-        inProgress = info.in_progress;
         items = info.items;
       }
     } else {
@@ -3130,25 +3152,19 @@ function renderPlanSelection() {
       if (date) title = planDayLong(date);
       const entry = planDayEntry(planSelection.date);
       if (entry) {
-        target = Number(entry.target) || 0;
-        actual = Number(entry.actual) || 0;
-        inProgress = planInProgress(entry.parts_in_progress);
         items = Array.isArray(entry.items) ? entry.items.filter(Boolean) : [];
       }
     }
   }
-  const accounted = actual + inProgress;
+  const counts = planPositionCounts(items);
   setText(planSelectionTitleEl, title);
-  setText(
-    planSelectionSummaryEl,
-    "План " + formatPlanNumber(target) + " · Факт " + planFactLabel(actual, inProgress) +
-      " · Остаток " + formatPlanNumber(Math.max(0, target - accounted))
-  );
+  const summary = counts.live > 0 ?
+    "Позиции: " + counts.total + " · Готово " + counts.done + " (+" + counts.live + ")" :
+    "Позиции: " + counts.total + " · Готово " + counts.done;
+  setText(planSelectionSummaryEl, summary);
   if (planSelectionSummaryEl) {
-    if (target > 0) {
-      const percent = Math.max(0, Math.min(100, Math.round((accounted / target) * 100)));
-      planSelectionSummaryEl.title = "Учтено " + formatPlanNumber(accounted) + " из " +
-        formatPlanNumber(target) + " · " + percent + " %";
+    if (counts.total > 0) {
+      planSelectionSummaryEl.title = "Готово " + counts.done + " из " + counts.total + " позиций";
     } else {
       planSelectionSummaryEl.removeAttribute("title");
     }
@@ -3189,13 +3205,11 @@ function renderPlanProgress(container, period) {
     label.className = "plan-progress-label";
     container.appendChild(label);
   }
-  const rawTarget = period ? (period.parts_target !== undefined ? period.parts_target : period.target) : 0;
-  const rawDone = period ? (period.parts_done !== undefined ? period.parts_done : period.actual) : 0;
-  const rawLive = period ? period.parts_in_progress : 0;
-  const target = Number(rawTarget) || 0;
-  const done = Math.max(0, Number(rawDone) || 0);
-  const live = Math.max(0, Number(rawLive) || 0);
-  if (!(target > 0)) {
+  const counts = planPositionCounts(period && Array.isArray(period.items) ? period.items : []);
+  const total = counts.total;
+  const done = counts.done;
+  const live = counts.live;
+  if (!(total > 0)) {
     track.hidden = true;
     track.removeAttribute("title");
     container.removeAttribute("title");
@@ -3205,16 +3219,15 @@ function renderPlanProgress(container, period) {
     return;
   }
   track.hidden = false;
-  const accounted = done + live;
-  const donePct = Math.min(100, Math.round((done / target) * 100));
-  const livePct = Math.min(100, Math.round((live / target) * 100));
-  const doneWidth = Math.min(100, (done / target) * 100);
-  const liveWidth = done >= target ? 0 : Math.min(100 - doneWidth, (live / target) * 100);
+  const doneWidth = Math.min(100, (done / total) * 100);
+  const liveWidth = done >= total ? 0 : Math.min(100 - doneWidth, (live / total) * 100);
   doneBar.style.width = doneWidth + "%";
   liveBar.style.width = liveWidth + "%";
-  label.textContent = formatPlanNumber(done) + " + " + formatPlanNumber(live) + " из " +
-    formatPlanNumber(target) + " · " + donePct + "% + " + livePct + "%";
-  const title = "Учтено " + formatPlanNumber(accounted) + " из " + formatPlanNumber(target);
+  const donePct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  const livePct = Math.max(0, Math.min(100, Math.round((live / total) * 100)));
+  const head = planPositionLabel(counts);
+  label.textContent = live > 0 ? head + " · " + donePct + "% + " + livePct + "%" : head + " · " + donePct + "%";
+  const title = "Готово " + done + " из " + total + " позиций";
   track.title = title;
   container.title = title;
 }
@@ -3224,12 +3237,12 @@ function planSelectedPeriod() {
     if (planSelection.kind === "week") {
       const info = planWeekInfo(planSelection.start);
       if (info) {
-        return { parts_target: info.target, parts_done: info.actual, parts_in_progress: info.in_progress };
+        return { items: info.items };
       }
     } else if (planSelection.date) {
       const entry = planDayEntry(planSelection.date);
       if (entry) {
-        return { parts_target: entry.target, parts_done: entry.actual, parts_in_progress: entry.parts_in_progress };
+        return { items: Array.isArray(entry.items) ? entry.items : [] };
       }
     }
   }
@@ -3244,8 +3257,7 @@ function renderPlan() {
   let badgeText = "неделя —";
   if (planData && planData.week) {
     const week = planData.week;
-    badgeText = "неделя " + planFactLabel(week.parts_done, week.parts_in_progress) + "/" +
-      formatPlanNumber(week.parts_target);
+    badgeText = "неделя " + planPositionLabel(planPositionCounts(week.items));
   }
   if (planBadgeEl) setText(planBadgeEl, badgeText);
   if (planButtonEl) {
