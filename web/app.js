@@ -183,7 +183,6 @@ let historyRangesEl = null;
 let historyKey = "";
 let historyRange = "24h";
 let historyRequest = 0;
-let modalPlan = null;
 let planButtonEl = null;
 let planBadgeEl = null;
 let planStatusEl = null;
@@ -3235,18 +3234,20 @@ async function refreshPlanMonth() {
   await loadPlanMonth(key, true);
 }
 
-function openPlanModal() {
-  if (!modalPlan) return;
+function openPlanTab() {
   setText(planStatusEl, "");
   if (!planCalendarMonth) planCalendarMonth = planMonthKey(new Date());
   if (!planSelectionInMonth(planCalendarMonth)) {
     planSelection = planDefaultSelection(planCalendarMonth);
   }
-  planCalendar = planCacheGet(planCalendarMonth) || null;
+  planCalendar = planCacheGet(planCalendarMonth) || planCalendar;
   renderPlanCalendar();
-  openModal(modalPlan);
   loadPlan();
   loadPlanMonth(planCalendarMonth);
+}
+
+function closePlanTab() {
+  showTab("overview");
 }
 
 function activePrinting() {
@@ -3464,7 +3465,7 @@ function handleKeyboard(event) {
       closeCardMenus();
       return;
     }
-    if (state.tab === "log") {
+    if (state.tab === "log" || state.tab === "plan") {
       event.preventDefault();
       showTab("overview");
     }
@@ -3652,7 +3653,6 @@ function init() {
   historyEventsEl = document.getElementById("history-events");
   historySummaryEl = document.getElementById("history-summary");
   historyRangesEl = document.getElementById("history-ranges");
-  modalPlan = document.getElementById("modal-plan");
   planButtonEl = document.getElementById("plan");
   planBadgeEl = document.getElementById("plan-badge");
   planStatusEl = document.getElementById("plan-status");
@@ -3840,7 +3840,9 @@ function init() {
     showTab("overview");
   });
 
-  if (planButtonEl) planButtonEl.addEventListener("click", openPlanModal);
+  if (planButtonEl) planButtonEl.addEventListener("click", function () {
+    showTab("plan");
+  });
   if (printingButtonEl) printingButtonEl.addEventListener("click", openPrintingModal);
   if (planImportEl) planImportEl.addEventListener("click", importPlan);
   if (planPrevEl) planPrevEl.addEventListener("click", function () {
