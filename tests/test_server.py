@@ -1881,8 +1881,32 @@ class ScheduleApiTests(unittest.TestCase):
         keys = [task["part_key"] for task in payload["tasks"]]
         keys += [item["part_key"] for item in payload["unscheduled"]]
         self.assertIn("A", keys)
-        self.assertNotIn("C", keys)
+        self.assertIn("C", keys)
         self.assertEqual(payload["totals"]["positions"], 1)
+        miss = next(item for item in payload["unscheduled"] if item["part_key"] == "C")
+        self.assertEqual(miss["reason"], "нет эталона")
+        self.assertEqual(miss["remaining"], 2)
+        self.assertEqual(payload["totals"]["copies"], 4)
+        self.assertEqual(payload["totals"]["scheduled"] + payload["totals"]["unscheduled"], 4)
+
+    def test_get_missing_reference_listed_as_unscheduled(self):
+        today = date.today().isoformat()
+        self.history.import_plan(
+            [{"date": today, "key": "N", "code": "N", "name": "N", "target": 3}]
+        )
+        self.add_duration("N", 60)
+        response = requests.get(self.url("/api/schedule?date=" + quote(today)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["tasks"], [])
+        self.assertEqual(len(payload["unscheduled"]), 1)
+        self.assertEqual(payload["unscheduled"][0]["part_key"], "N")
+        self.assertEqual(payload["unscheduled"][0]["reason"], "нет эталона")
+        self.assertEqual(payload["unscheduled"][0]["remaining"], 3)
+        self.assertEqual(payload["totals"]["positions"], 0)
+        self.assertEqual(payload["totals"]["copies"], 3)
+        self.assertEqual(payload["totals"]["scheduled"], 0)
+        self.assertEqual(payload["totals"]["unscheduled"], 3)
 
     def test_get_does_not_write(self):
         today = date.today()

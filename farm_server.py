@@ -969,6 +969,11 @@ class FarmHandler(BaseHTTPRequestHandler):
         included: set[str] = set()
         day_items = []
         week_items = []
+        # NOTE: totals.positions counts only positions passed to the engine
+        # (parts with a reference file). Parts without a reference are not
+        # passed to the engine; they are appended to `unscheduled` afterwards
+        # with reason "нет эталона" and counted in totals.unscheduled/copies.
+        missing_ref: list[dict] = []
         day_scope = (plan.get("day", {}) or {}).get("items") or []
         week_scope = (plan.get("week", {}) or {}).get("items") or []
         scopes = [(day_items, day_scope), (week_items, week_scope)]
@@ -998,6 +1003,15 @@ class FarmHandler(BaseHTTPRequestHandler):
                 except (OSError, TypeError, ValueError):
                     has_ref = False
                 if not has_ref:
+                    name = str(entry.get("name") or entry.get("code") or key)
+                    number = entry.get("number")
+                    try:
+                        number = int(number) if number is not None else None
+                    except (TypeError, ValueError):
+                        number = None
+                    missing_ref.append({"part_key": key, "number": number, "name": name,
+                                        "remaining": remaining})
+                    included.add(key)
                     continue
                 name = str(entry.get("name") or entry.get("code") or key)
                 number = entry.get("number")
@@ -1077,7 +1091,15 @@ class FarmHandler(BaseHTTPRequestHandler):
         for item in items:
             value, _ = estimate_seconds(durations.get(item["part_key"]) or [])
             estimates[item["part_key"]] = value
-        self._send_json(build_schedule(now, day, items, printers, ready, estimates))
+        result = build_schedule(now, day, items, printers, ready, estimates)
+        for miss in missing_ref:
+            result["unscheduled"].append({
+                "part_key": miss["part_key"], "number": miss["number"], "name": miss["name"],
+                "remaining": miss["remaining"], "reason": "нет эталона",
+            })
+            result["totals"]["copies"] += miss["remaining"]
+            result["totals"]["unscheduled"] += miss["remaining"]
+        self._send_json(result)
 
     def _api_schedule_apply(self) -> None:
         payload = self._read_json()

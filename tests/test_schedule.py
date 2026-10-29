@@ -180,6 +180,14 @@ class BuildScheduleTests(unittest.TestCase):
         self.assertEqual(out["totals"]["unscheduled"], 0)
 
 
+    def test_start_exactly_at_18_rejected(self):
+        out = build_schedule(NOW, DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 1}],
+                             [{"key": "p1", "name": "P1", "state": "printing", "finish_at": at("18:00")}],
+                             {"p1": {"a"}}, {"a": 3600})
+        self.assertEqual(out["tasks"], [])
+        self.assertEqual(len(out["unscheduled"]), 1)
+        self.assertEqual(out["unscheduled"][0]["remaining"], 1)
+
     def test_stored_epoch_start_finish_contract(self):
         out = build_schedule(NOW, DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 1}],
                              [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
