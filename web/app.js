@@ -2634,6 +2634,12 @@ function planShortDate(date) {
   return planPad(date.getDate()) + "." + planPad(date.getMonth() + 1) + "." + date.getFullYear();
 }
 
+function planInProgress(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number;
+}
+
 function planItemPercent(item) {
   const provided = item ? item.percent : null;
   if (provided !== null && provided !== undefined && provided !== "") {
@@ -2641,7 +2647,7 @@ function planItemPercent(item) {
     if (Number.isFinite(percent)) return Math.max(0, Math.min(100, Math.round(percent)));
   }
   const target = Number(item ? item.target : 0);
-  const actual = Number(item ? item.actual : 0);
+  const actual = Number(item ? item.actual : 0) + planInProgress(item ? item.in_progress : 0);
   if (!Number.isFinite(target) || target <= 0) return 0;
   if (!Number.isFinite(actual) || actual <= 0) return 0;
   return Math.max(0, Math.min(100, Math.round((actual / target) * 100)));
@@ -2736,6 +2742,7 @@ function planAggregateItems(entries) {
           code: item.code || "",
           target: 0,
           actual: 0,
+          in_progress: 0,
           percent: null,
         };
         seen.set(key, row);
@@ -2744,6 +2751,7 @@ function planAggregateItems(entries) {
       const row = seen.get(key);
       row.target += Number(item.target) || 0;
       row.actual += Number(item.actual) || 0;
+      row.in_progress += planInProgress(item.in_progress);
     }
   }
   return rows;
@@ -2761,6 +2769,7 @@ function planWeekInfo(startKey) {
       week: Number(found.week) || planIsoWeek(start).week,
       target: Number(found.target) || 0,
       actual: Number(found.actual) || 0,
+      in_progress: planInProgress(found.in_progress),
       items: Array.isArray(found.items) ? found.items.filter(Boolean) : [],
     };
   }
@@ -2772,9 +2781,11 @@ function planWeekInfo(startKey) {
   }
   let target = 0;
   let actual = 0;
+  let inProgress = 0;
   for (const entry of entries) {
     target += Number(entry.target) || 0;
     actual += Number(entry.actual) || 0;
+    inProgress += planInProgress(entry.in_progress);
   }
   return {
     start: start,
@@ -2782,6 +2793,7 @@ function planWeekInfo(startKey) {
     week: planIsoWeek(start).week,
     target: target,
     actual: actual,
+    in_progress: inProgress,
     items: planAggregateItems(entries),
   };
 }
@@ -2799,8 +2811,20 @@ function planDayStatus(entry) {
   return planStatusClass(entry ? entry.target : 0, entry ? entry.actual : 0);
 }
 
-function planCountLabel(target, actual) {
-  return formatPlanNumber(target) + " / " + formatPlanNumber(actual);
+function planCountLabel(target, actual, inProgress) {
+  const extra = planInProgress(inProgress);
+  const label = formatPlanNumber(target) + " / " + formatPlanNumber(actual);
+  return extra > 0 ? label + " (+" + formatPlanNumber(extra) + ")" : label;
+}
+
+function planFactLabel(actual, inProgress) {
+  const extra = planInProgress(inProgress);
+  return formatPlanNumber(actual) + (extra > 0 ? " (+" + formatPlanNumber(extra) + ")" : "");
+}
+
+function planProgressNote(inProgress) {
+  const extra = planInProgress(inProgress);
+  return extra > 0 ? ", в работе " + formatPlanNumber(extra) : "";
 }
 
 function planDefaultSelection(key) {
@@ -2876,10 +2900,14 @@ function planCalendarRow(dayButton, entry, date, monthIndex, todayKey) {
   count.className = "plan-day-count";
   const target = entry ? Number(entry.target) || 0 : 0;
   const actual = entry ? Number(entry.actual) || 0 : 0;
-  count.textContent = target > 0 || actual > 0 ? planCountLabel(target, actual) : "";
+  const inProgress = planInProgress(entry ? entry.in_progress : 0);
+  count.textContent = target > 0 || actual > 0 || inProgress > 0
+    ? planCountLabel(target, actual, inProgress)
+    : "";
   dayButton.appendChild(number);
   dayButton.appendChild(count);
-  const title = planDayLong(date) + " · план " + formatPlanNumber(target) + ", факт " + formatPlanNumber(actual);
+  const title = planDayLong(date) + " · план " + formatPlanNumber(target) + ", факт " + formatPlanNumber(actual) +
+    planProgressNote(inProgress);
   dayButton.title = title;
   dayButton.setAttribute("aria-label", title);
   return key;
@@ -2903,13 +2931,18 @@ function planWeekButton(startKey, isoWeek) {
   number.textContent = "Нед. " + (info ? info.week : isoWeek);
   const count = document.createElement("span");
   count.className = "plan-week-count";
-  count.textContent = planCountLabel(info ? info.target : 0, info ? info.actual : 0);
+  count.textContent = planCountLabel(
+    info ? info.target : 0,
+    info ? info.actual : 0,
+    info ? info.in_progress : 0
+  );
   button.appendChild(number);
   button.appendChild(count);
   const start = planDay(startKey);
   const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
   const title = "Неделя " + (info ? info.week : isoWeek) + " · " + planLongRange(start, end) +
-    " · план " + formatPlanNumber(info ? info.target : 0) + ", факт " + formatPlanNumber(info ? info.actual : 0);
+    " · план " + formatPlanNumber(info ? info.target : 0) + ", факт " + formatPlanNumber(info ? info.actual : 0) +
+    planProgressNote(info ? info.in_progress : 0);
   button.title = title;
   button.setAttribute("aria-label", title);
   return button;
@@ -2940,6 +2973,7 @@ function renderPlanCalendar() {
         const entry = planDayEntry(day.date) || {
           target: Number(day.target) || 0,
           actual: Number(day.actual) || 0,
+          in_progress: planInProgress(day.in_progress),
           items: [],
         };
         const button = document.createElement("button");
@@ -2981,6 +3015,8 @@ function renderPlanTable(items) {
   for (const item of items) {
     const target = Number(item.target) || 0;
     const actual = Number(item.actual) || 0;
+    const inProgress = planInProgress(item.in_progress);
+    const accounted = actual + inProgress;
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
     nameCell.className = "plan-name";
@@ -2994,15 +3030,26 @@ function renderPlanTable(items) {
       nameCell.appendChild(small);
     }
     row.appendChild(nameCell);
-    for (const value of [target, actual, Math.max(0, target - actual)]) {
+    const cells = [
+      formatPlanNumber(target),
+      planFactLabel(actual, inProgress),
+      formatPlanNumber(Math.max(0, target - accounted)),
+    ];
+    for (const text of cells) {
       const cell = document.createElement("td");
       cell.className = "plan-num";
-      cell.textContent = formatPlanNumber(value);
+      cell.textContent = text;
       row.appendChild(cell);
     }
-    const percent = planItemPercent(item);
+    let percent = planItemPercent(item);
+    if (inProgress > 0 && target > 0) {
+      percent = Math.max(0, Math.min(100, Math.round((accounted / target) * 100)));
+    }
     const percentCell = document.createElement("td");
     percentCell.className = "plan-percent";
+    if (inProgress > 0) {
+      percentCell.title = "Учтено " + formatPlanNumber(accounted) + " из " + formatPlanNumber(target);
+    }
     const track = document.createElement("div");
     track.className = "plan-mini";
     const bar = document.createElement("i");
@@ -3025,6 +3072,7 @@ function renderPlanSelection() {
   let title = "—";
   let target = 0;
   let actual = 0;
+  let inProgress = 0;
   let items = [];
   if (planCalendar && planSelection) {
     if (planSelection.kind === "week") {
@@ -3033,6 +3081,7 @@ function renderPlanSelection() {
         title = "Неделя " + info.week + " · " + planLongRange(info.start, info.end);
         target = info.target;
         actual = info.actual;
+        inProgress = info.in_progress;
         items = info.items;
       }
     } else {
@@ -3042,16 +3091,27 @@ function renderPlanSelection() {
       if (entry) {
         target = Number(entry.target) || 0;
         actual = Number(entry.actual) || 0;
+        inProgress = planInProgress(entry.in_progress);
         items = Array.isArray(entry.items) ? entry.items.filter(Boolean) : [];
       }
     }
   }
+  const accounted = actual + inProgress;
   setText(planSelectionTitleEl, title);
   setText(
     planSelectionSummaryEl,
-    "План " + formatPlanNumber(target) + " · Факт " + formatPlanNumber(actual) +
-      " · Остаток " + formatPlanNumber(Math.max(0, target - actual))
+    "План " + formatPlanNumber(target) + " · Факт " + planFactLabel(actual, inProgress) +
+      " · Остаток " + formatPlanNumber(Math.max(0, target - accounted))
   );
+  if (planSelectionSummaryEl) {
+    if (target > 0) {
+      const percent = Math.max(0, Math.min(100, Math.round((accounted / target) * 100)));
+      planSelectionSummaryEl.title = "Учтено " + formatPlanNumber(accounted) + " из " +
+        formatPlanNumber(target) + " · " + percent + " %";
+    } else {
+      planSelectionSummaryEl.removeAttribute("title");
+    }
+  }
   renderPlanTable(items);
 }
 
@@ -3059,7 +3119,8 @@ function renderPlan() {
   let badgeText = "неделя —";
   if (planData && planData.week) {
     const week = planData.week;
-    badgeText = "неделя " + formatPlanNumber(week.parts_done) + "/" + formatPlanNumber(week.parts_target);
+    badgeText = "неделя " + planFactLabel(week.parts_done, week.parts_in_progress) + "/" +
+      formatPlanNumber(week.parts_target);
   }
   if (planBadgeEl) setText(planBadgeEl, badgeText);
   if (planButtonEl) {

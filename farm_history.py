@@ -165,10 +165,62 @@ def _calendar_items(entries: dict[str, dict]) -> list[dict]:
                 "name": str(entry["name"]),
                 "target": target,
                 "actual": actual,
+                "in_progress": int(entry.get("in_progress", 0)),
                 "percent": round(actual / target * 100.0, 1) if target > 0 else 0.0,
             }
         )
     return items
+
+
+def _live_counts(live_parts) -> dict[str, dict]:
+    counts: dict[str, dict] = {}
+    for part in live_parts or []:
+        if not isinstance(part, dict):
+            continue
+        key = str(part.get("key") or "").strip()
+        if not key:
+            continue
+        try:
+            count = int(part.get("count") or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        entry = counts.setdefault(key, {"code": "", "name": "", "in_progress": 0})
+        if not entry["code"]:
+            entry["code"] = str(part.get("code") or "")
+        if not entry["name"]:
+            entry["name"] = str(part.get("name") or "")
+        entry["in_progress"] += count
+    return counts
+
+
+def _with_live(items: list[dict], counts: dict[str, dict]) -> list[dict]:
+    result = []
+    seen = set()
+    for item in items:
+        entry = counts.get(item["key"])
+        item["in_progress"] = int(entry["in_progress"]) if entry is not None else 0
+        seen.add(item["key"])
+        result.append(item)
+    for key in sorted(counts):
+        if key in seen:
+            continue
+        entry = counts[key]
+        result.append(
+            {
+                "key": key,
+                "code": entry["code"],
+                "name": entry["name"],
+                "target": 0,
+                "actual": 0,
+                "percent": 0.0,
+                "days": [],
+                "in_progress": int(entry["in_progress"]),
+            }
+        )
+    result.sort(key=lambda item: item["key"])
+    return result
 
 
 def _period_bounds(period: str, now: float) -> tuple[float, float]:
@@ -346,8 +398,10 @@ class HistoryStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def plan(self, now=None) -> dict:
+    def plan(self, now=None, live_parts=None) -> dict:
         moment = float(self._clock() if now is None else now)
+        today = _day_of(moment)
+        live = _live_counts(live_parts)
         with self._lock:
             goals = {
                 str(row["period"]): row
@@ -357,8 +411,12 @@ class HistoryStore:
             result = {}
             for period in PERIODS:
                 start, end = _period_bounds(period, moment)
+                start_date, end_date, week_start = _period_dates(start, end)
                 items = self._period_items(start, end, self._actuals(start, end))
-                if items:
+                plan_rows = bool(items)
+                in_progress = live if start_date <= today <= end_date else {}
+                items = _with_live(items, in_progress)
+                if plan_rows:
                     parts_target = sum(item["target"] for item in items)
                     parts_done = sum(item["actual"] for item in items)
                 else:
@@ -368,17 +426,17 @@ class HistoryStore:
                         "WHERE event = 'complete' AND ts >= ? AND ts < ?",
                         (start, end),
                     ).fetchone()[0] or 0
+                parts_in_progress = sum(item["in_progress"] for item in items)
                 hours = 0.0
                 for key in printers:
                     for segment in self.segments(key, start, end):
                         if segment["state"] == "printing":
                             hours += float(segment["end"]) - float(segment["start"])
                 goal = goals.get(period)
-                if goal is not None and not items:
+                if goal is not None and not plan_rows:
                     parts_target = int(goal["parts_target"])
                 hours_target = float(goal["hours_target"]) if goal is not None else 0.0
                 parts_done = int(parts_done)
-                start_date, end_date, week_start = _period_dates(start, end)
                 result[period] = {
                     "period": period,
                     "start": start,
@@ -389,6 +447,7 @@ class HistoryStore:
                     "parts_target": parts_target,
                     "hours_target": hours_target,
                     "parts_done": parts_done,
+                    "parts_in_progress": parts_in_progress,
                     "hours_done": round(hours / 3600.0, 3),
                     "parts_percent": round(parts_done / parts_target * 100.0, 1) if parts_target > 0 else 0.0,
                     "hours_percent": round(hours / 3600.0 / hours_target * 100.0, 1) if hours_target > 0 else 0.0,
@@ -396,9 +455,10 @@ class HistoryStore:
                 }
             return result
 
-    def calendar(self, month=None, now=None) -> dict:
+    def calendar(self, month=None, now=None, live_parts=None) -> dict:
         moment = float(self._clock() if now is None else now)
         today = _day_of(moment)
+        live = _live_counts(live_parts)
         first = _month_first(str(month or "").strip() or today[:7])
         following = _next_month(first)
         last = following - timedelta(days=1)
@@ -430,6 +490,16 @@ class HistoryStore:
                 key, {"code": "", "name": "", "target": 0, "actual": 0}
             )
             entry["actual"] += count
+        if live and span_start <= today <= span_end:
+            for key, live_entry in live.items():
+                entry = per_day.setdefault(today, {}).setdefault(
+                    key, {"code": "", "name": "", "target": 0, "actual": 0}
+                )
+                if not entry["code"]:
+                    entry["code"] = live_entry["code"]
+                if not entry["name"]:
+                    entry["name"] = live_entry["name"]
+                entry["in_progress"] = int(live_entry["in_progress"])
         day_rows = {}
         for offset in range((span_last - span_first).days + 1):
             day = span_first + timedelta(days=offset)
@@ -439,6 +509,7 @@ class HistoryStore:
                 "weekday": day.weekday() + 1,
                 "target": sum(item["target"] for item in items),
                 "actual": sum(item["actual"] for item in items),
+                "parts_in_progress": sum(item["in_progress"] for item in items),
                 "items": items,
             }
         days = [day_rows[(first + timedelta(days=offset)).isoformat()] for offset in range((last - first).days + 1)]
@@ -452,7 +523,14 @@ class HistoryStore:
                 week_days.append({"date": row["date"], "target": row["target"], "actual": row["actual"]})
                 for item in row["items"]:
                     entry = merged.setdefault(
-                        item["key"], {"code": item["code"], "name": item["name"], "target": 0, "actual": 0}
+                        item["key"],
+                        {
+                            "code": item["code"],
+                            "name": item["name"],
+                            "target": 0,
+                            "actual": 0,
+                            "in_progress": 0,
+                        },
                     )
                     if not entry["code"]:
                         entry["code"] = item["code"]
@@ -460,6 +538,7 @@ class HistoryStore:
                         entry["name"] = item["name"]
                     entry["target"] += item["target"]
                     entry["actual"] += item["actual"]
+                    entry["in_progress"] += item["in_progress"]
             iso = cursor.isocalendar()
             weeks.append(
                 {
@@ -469,6 +548,7 @@ class HistoryStore:
                     "end": (cursor + timedelta(days=6)).isoformat(),
                     "target": sum(day["target"] for day in week_days),
                     "actual": sum(day["actual"] for day in week_days),
+                    "parts_in_progress": sum(entry["in_progress"] for entry in merged.values()),
                     "items": _calendar_items(merged),
                     "days": week_days,
                 }

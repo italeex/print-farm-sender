@@ -36,7 +36,7 @@ from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
-from farm_plan import PLAN_SUFFIXES, parse_plan_file
+from farm_plan import PLAN_SUFFIXES, parse_plan_file, part_key, split_code_name
 from farm_thumbs import ThumbCache, thumbnail_from_file
 
 LOGGER = logging.getLogger(__name__)
@@ -365,7 +365,7 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._api_thumb(path[len("/api/thumb/"):])
             return
         if path == "/api/plan":
-            self._send_json(self.app.history.plan())
+            self._send_json(self.app.history.plan(live_parts=self._live_parts()))
             return
         if path == "/api/plan/calendar":
             self._api_plan_calendar(query)
@@ -540,12 +540,37 @@ class FarmHandler(BaseHTTPRequestHandler):
                 self._send_error(400, "Целевые часы должны быть числом не меньше нуля")
                 return
         self.app.history.set_goal(period, parts_target, hours_target)
-        self._send_json(self.app.history.plan())
+        self._send_json(self.app.history.plan(live_parts=self._live_parts()))
+
+    def _live_parts(self) -> list[dict]:
+        parts: dict[str, dict] = {}
+        for view in self.app.monitor.snapshot().get("printers") or []:
+            if str(view.get("state") or "") not in ("printing", "paused"):
+                continue
+            for item in view.get("parts") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = part_key(item.get("name") or "")
+                if not key:
+                    continue
+                try:
+                    count = int(item.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if count <= 0:
+                    continue
+                entry = parts.setdefault(key, {"key": key, "code": "", "name": "", "count": 0})
+                if not entry["name"]:
+                    code, name = split_code_name(item.get("name") or "")
+                    entry["code"] = code
+                    entry["name"] = name[:-4] if name.lower().endswith(".stl") else name
+                entry["count"] += count
+        return [parts[key] for key in sorted(parts)]
 
     def _api_plan_calendar(self, query) -> None:
         month = self._query_text(query, "month").strip()
         try:
-            payload = self.app.history.calendar(month or None)
+            payload = self.app.history.calendar(month or None, live_parts=self._live_parts())
         except ValueError as exc:
             self._send_error(400, str(exc) or "Некорректный месяц")
             return

@@ -973,6 +973,96 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(payload["day"]["parts_done"], 35)
         self.assertEqual(payload["day"]["parts_percent"], 50.0)
 
+    def test_plan_live_parts_printing(self):
+        today = datetime.fromtimestamp(time.time()).date().isoformat()
+        self.history.import_plan(
+            [{"date": today, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 20}]
+        )
+        self.monitor.view = replace(
+            self.monitor.view,
+            state="printing",
+            parts=[{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 16}],
+        )
+        day = requests.get(self.url("/api/plan"), timeout=3).json()["day"]
+        self.assertEqual(day["parts_done"], 0)
+        self.assertEqual(day["parts_in_progress"], 16)
+        item = day["items"][0]
+        self.assertEqual(item["key"], "ГР3.01.42000.01")
+        self.assertEqual(item["target"], 20)
+        self.assertEqual(item["actual"], 0)
+        self.assertEqual(item["in_progress"], 16)
+
+    def test_plan_live_parts_paused(self):
+        self.monitor.view = replace(
+            self.monitor.view,
+            state="paused",
+            parts=[{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 16}],
+        )
+        day = requests.get(self.url("/api/plan"), timeout=3).json()["day"]
+        self.assertEqual(day["parts_in_progress"], 16)
+        item = day["items"][0]
+        self.assertEqual(item["key"], "ГР3.01.42000.01")
+        self.assertEqual(item["name"], "Крышка")
+        self.assertEqual(item["target"], 0)
+        self.assertEqual(item["actual"], 0)
+        self.assertEqual(item["in_progress"], 16)
+
+    def test_plan_live_parts_merged_across_printers(self):
+        first = replace(
+            self.monitor.view,
+            state="printing",
+            parts=[{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 10}],
+        )
+        second = replace(first, key="10.0.0.9:7125", name="Второй", parts=[{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 6}])
+        idle = replace(first, key="10.0.0.10:7125", name="Третий", state="idle")
+        views = [first, second, idle]
+
+        class Views:
+            def snapshot(self):
+                return {"printers": [asdict(view) for view in views]}
+
+        self.app.monitor = Views()
+        day = requests.get(self.url("/api/plan"), timeout=3).json()["day"]
+        self.assertEqual(day["parts_in_progress"], 16)
+        self.assertEqual(day["items"][0]["in_progress"], 16)
+
+    def test_plan_completed_moves_to_actual_when_idle(self):
+        now = time.time()
+        self.record_cycle(now)
+        self.monitor.view = replace(self.monitor.view, state="idle", parts=[])
+        payload = requests.get(self.url("/api/plan"), timeout=3).json()
+        self.assertEqual(payload["day"]["parts_done"], 35)
+        self.assertEqual(payload["day"]["parts_in_progress"], 0)
+        self.monitor.view = replace(
+            self.monitor.view,
+            state="printing",
+            parts=[{"name": "Корпус", "count": 16}],
+        )
+        busy = requests.get(self.url("/api/plan"), timeout=3).json()["day"]
+        self.assertEqual(busy["parts_done"], 35)
+        self.assertEqual(busy["parts_in_progress"], 16)
+        self.assertEqual(busy["items"][0]["actual"], 0)
+        self.assertEqual(busy["items"][0]["in_progress"], 16)
+
+    def test_plan_calendar_live_parts(self):
+        self.monitor.view = replace(
+            self.monitor.view,
+            state="printing",
+            parts=[{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 16}],
+        )
+        payload = requests.get(self.url("/api/plan/calendar"), timeout=3).json()
+        today = datetime.fromtimestamp(time.time()).date().isoformat()
+        day = next(item for item in payload["days"] if item["date"] == today)
+        self.assertEqual(day["parts_in_progress"], 16)
+        self.assertEqual(day["actual"], 0)
+        self.assertEqual(day["items"][0]["in_progress"], 16)
+        self.assertEqual(day["items"][0]["target"], 0)
+        week = next(item for item in payload["weeks"] if item["start"] <= today <= item["end"])
+        self.assertEqual(week["parts_in_progress"], 16)
+        self.assertEqual(week["items"][0]["in_progress"], 16)
+        others = [item for item in payload["weeks"] if not item["start"] <= today <= item["end"]]
+        self.assertTrue(all(item["parts_in_progress"] == 0 for item in others))
+
     def test_plan_validation(self):
         bad_period = requests.post(
             self.url("/api/plan"),

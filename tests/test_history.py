@@ -494,6 +494,7 @@ class HistoryStoreTests(unittest.TestCase):
                     "name": "Крышка",
                     "target": 10,
                     "actual": 4,
+                    "in_progress": 0,
                     "percent": 40.0,
                 }
             ],
@@ -531,6 +532,113 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual((weeks[4]["year"], weeks[4]["week"]), (2024, 13))
         self.assertEqual((weeks[4]["start"], weeks[4]["end"]), ("2024-03-25", "2024-03-31"))
         self.assertEqual(len(weeks[4]["days"]), 7)
+
+    def test_plan_live_parts_in_progress(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 20}]
+        )
+        printing = make_view("printing", "Крышка.gcode", [{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 4}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "Крышка.gcode"), printing, BASE + 60)
+        live = [{"key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "count": 16}]
+        plan = self.history.plan(now=BASE + 60, live_parts=live)["day"]
+        self.assertEqual(plan["parts_done"], 4)
+        self.assertEqual(plan["parts_in_progress"], 16)
+        item = plan["items"][0]
+        self.assertEqual(item["target"], 20)
+        self.assertEqual(item["actual"], 4)
+        self.assertEqual(item["in_progress"], 16)
+        self.assertEqual(item["percent"], 20.0)
+
+    def test_plan_live_parts_without_plan_row(self):
+        live = [{"key": "ГР9.99.99999.99", "code": "МВСЛ.ГР9.99.99999.99", "name": "Другое", "count": 3}]
+        plan = self.history.plan(now=BASE, live_parts=live)
+        for period in PERIODS:
+            self.assertEqual(plan[period]["parts_done"], 0)
+            self.assertEqual(plan[period]["parts_in_progress"], 3)
+            item = plan[period]["items"][0]
+            self.assertEqual(item["key"], "ГР9.99.99999.99")
+            self.assertEqual(item["code"], "МВСЛ.ГР9.99.99999.99")
+            self.assertEqual(item["name"], "Другое")
+            self.assertEqual(item["target"], 0)
+            self.assertEqual(item["actual"], 0)
+            self.assertEqual(item["in_progress"], 3)
+            self.assertEqual(item["percent"], 0.0)
+
+    def test_plan_live_parts_merge_duplicates(self):
+        live = [
+            {"key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "count": 10},
+            {"key": "ГР3.01.42000.01", "code": "", "name": "", "count": 6},
+        ]
+        plan = self.history.plan(now=BASE, live_parts=live)["day"]
+        self.assertEqual(plan["parts_in_progress"], 16)
+        self.assertEqual(plan["items"][0]["in_progress"], 16)
+
+    def test_plan_live_parts_drop_after_idle(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "КОРПУС", "code": "МВСЛ.КОРПУС", "name": "Корпус", "target": 20}]
+        )
+        printing = make_view("printing", "Корпус.gcode", [{"name": "Корпус", "count": 35}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "Корпус.gcode"), printing, BASE + 60)
+        live = [{"key": "КОРПУС", "code": "МВСЛ.КОРПУС", "name": "Корпус", "count": 35}]
+        busy = self.history.plan(now=BASE + 60, live_parts=live)["day"]
+        self.assertEqual(busy["parts_done"], 35)
+        self.assertEqual(busy["parts_in_progress"], 35)
+        self.assertEqual(busy["items"][0]["actual"], 35)
+        self.assertEqual(busy["items"][0]["in_progress"], 35)
+        idle = self.history.plan(now=BASE + 60, live_parts=[])["day"]
+        self.assertEqual(idle["parts_done"], 35)
+        self.assertEqual(idle["parts_in_progress"], 0)
+        self.assertEqual(idle["items"][0]["actual"], 35)
+        self.assertEqual(idle["items"][0]["in_progress"], 0)
+
+    def test_calendar_live_parts_only_today(self):
+        moment = datetime(2024, 3, 18, 12, 0).timestamp()
+        self.history.import_plan(
+            [
+                {"date": "2024-03-18", "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10},
+                {"date": "2024-03-19", "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 5},
+            ]
+        )
+        live = [{"key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "count": 16}]
+        data = self.history.calendar("2024-03", now=moment, live_parts=live)
+        days = {day["date"]: day for day in data["days"]}
+        self.assertEqual(days["2024-03-17"]["parts_in_progress"], 0)
+        self.assertEqual(days["2024-03-18"]["target"], 10)
+        self.assertEqual(days["2024-03-18"]["actual"], 0)
+        self.assertEqual(days["2024-03-18"]["parts_in_progress"], 16)
+        self.assertEqual(days["2024-03-18"]["items"][0]["in_progress"], 16)
+        self.assertEqual(days["2024-03-19"]["parts_in_progress"], 0)
+        self.assertEqual(days["2024-03-19"]["items"][0]["in_progress"], 0)
+        self.assertEqual(days["2024-03-19"]["items"][0]["target"], 5)
+        weeks = {week["start"]: week for week in data["weeks"]}
+        self.assertEqual(weeks["2024-03-11"]["parts_in_progress"], 0)
+        self.assertEqual(weeks["2024-03-18"]["parts_in_progress"], 16)
+        self.assertEqual(weeks["2024-03-18"]["items"][0]["in_progress"], 16)
+        self.assertEqual(weeks["2024-03-25"]["parts_in_progress"], 0)
+
+    def test_calendar_live_parts_outside_month(self):
+        moment = datetime(2024, 3, 18, 12, 0).timestamp()
+        live = [{"key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "count": 16}]
+        data = self.history.calendar("2024-02", now=moment, live_parts=live)
+        self.assertTrue(all(day["parts_in_progress"] == 0 for day in data["days"]))
+        self.assertTrue(all(week["parts_in_progress"] == 0 for week in data["weeks"]))
+        self.assertTrue(all(item["in_progress"] == 0 for week in data["weeks"] for item in week["items"]))
+
+    def test_calendar_live_parts_without_plan_row(self):
+        moment = datetime(2024, 3, 18, 12, 0).timestamp()
+        live = [{"key": "ГР9.99.99999.99", "code": "МВСЛ.ГР9.99.99999.99", "name": "Другое", "count": 3}]
+        data = self.history.calendar("2024-03", now=moment, live_parts=live)
+        days = {day["date"]: day for day in data["days"]}
+        item = days["2024-03-18"]["items"][0]
+        self.assertEqual(item["key"], "ГР9.99.99999.99")
+        self.assertEqual(item["target"], 0)
+        self.assertEqual(item["actual"], 0)
+        self.assertEqual(item["in_progress"], 3)
+        self.assertEqual(days["2024-03-18"]["parts_in_progress"], 3)
 
     def test_calendar_default_month_and_validation(self):
         moment = datetime(2024, 3, 18, 12, 0).timestamp()
