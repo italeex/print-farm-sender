@@ -81,6 +81,10 @@ const state = {
   catalogRequest: 0,
   matrixPrinters: new Set(),
   fileBusy: false,
+  shiftDate: "",
+  shiftData: null,
+  shiftBusy: false,
+  shiftRequest: 0,
 };
 
 const cards = new Map();
@@ -269,6 +273,23 @@ let fileRefreshEl = null;
 let fileDeleteSelectedEl = null;
 let fileDeleteAllEl = null;
 let fileSyncEl = null;
+let shiftDateEl = null;
+let shiftTodayEl = null;
+let shiftRefreshEl = null;
+let shiftSummaryEl = null;
+let shiftWindowEl = null;
+let shiftStatusEl = null;
+let shiftEmptyEl = null;
+let shiftPrintersEl = null;
+let shiftPrintersBodyEl = null;
+let shiftPrintersEmptyEl = null;
+let shiftPrintersWrapEl = null;
+let shiftUnscheduledEl = null;
+let shiftUnscheduledBodyEl = null;
+let shiftUnscheduledWrapEl = null;
+let shiftUnscheduledTitleEl = null;
+let shiftUploadEl = null;
+let shiftApplyEl = null;
 function pick(root, selectors) {
   for (const selector of selectors) {
     const found = root.querySelector(selector);
@@ -2439,6 +2460,244 @@ function setJournalOpen(value) {
   else showTab(value ? "log" : "overview");
 }
 
+function shiftTodayKey() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return now.getFullYear() + "-" + month + "-" + day;
+}
+
+function shiftFormatHM(epoch) {
+  const number = Number(epoch);
+  if (!Number.isFinite(number) || number <= 0) return "—";
+  const date = new Date(number * 1000);
+  if (Number.isNaN(date.getTime())) return "—";
+  return String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
+}
+
+function shiftFormatFinish(start, finish) {
+  const text = shiftFormatHM(finish);
+  if (text === "—") return text;
+  const startDate = new Date(Number(start) * 1000);
+  const finishDate = new Date(Number(finish) * 1000);
+  if (
+    Number.isFinite(Number(start)) &&
+    Number(start) > 0 &&
+    !Number.isNaN(startDate.getTime()) &&
+    !Number.isNaN(finishDate.getTime()) &&
+    startDate.toDateString() !== finishDate.toDateString()
+  ) {
+    return text + " +1 день";
+  }
+  return text;
+}
+
+function shiftMissingTasks() {
+  const data = state.shiftData;
+  if (!data || !Array.isArray(data.tasks)) return [];
+  return data.tasks.filter(function (task) {
+    return task && !task.file_ready;
+  });
+}
+
+function shiftSetBusy(busy) {
+  state.shiftBusy = busy;
+  if (shiftRefreshEl) shiftRefreshEl.disabled = busy;
+  if (shiftTodayEl) shiftTodayEl.disabled = busy;
+  if (shiftDateEl) shiftDateEl.disabled = busy;
+  updateShiftButtons();
+}
+
+function updateShiftButtons() {
+  const busy = state.shiftBusy;
+  const data = state.shiftData;
+  const closed = Boolean(data && data.closed);
+  const missing = shiftMissingTasks();
+  if (shiftUploadEl) shiftUploadEl.disabled = busy || closed || missing.length === 0;
+  if (shiftApplyEl) {
+    const tasks = data && Array.isArray(data.tasks) ? data.tasks : [];
+    shiftApplyEl.disabled = busy || closed || tasks.length === 0;
+  }
+}
+
+function shiftAppendCell(row, text, className) {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  cell.textContent = text === null || text === undefined ? "" : String(text);
+  row.appendChild(cell);
+}
+
+function renderShift() {
+  if (!shiftSummaryEl) return;
+  const data = state.shiftData;
+  if (!data) {
+    setText(shiftSummaryEl, "—");
+    if (shiftEmptyEl) shiftEmptyEl.hidden = true;
+    if (shiftPrintersWrapEl) shiftPrintersWrapEl.hidden = true;
+    if (shiftUnscheduledWrapEl) shiftUnscheduledWrapEl.hidden = true;
+    if (shiftUnscheduledTitleEl) shiftUnscheduledTitleEl.hidden = true;
+    updateShiftButtons();
+    return;
+  }
+  const window = data.window && typeof data.window === "object" ? data.window : {};
+  const windowText = (window.start || "09:00") + "–" + (window.end || "18:00");
+  setText(shiftWindowEl, windowText);
+  const totals = data.totals && typeof data.totals === "object" ? data.totals : {};
+  const positions = Number(totals.positions) || 0;
+  const copies = Number(totals.copies) || 0;
+  const queued = Number(totals.scheduled) || 0;
+  const left = Number(totals.unscheduled) || 0;
+  setText(
+    shiftSummaryEl,
+    "Позиций " + positions + " · Копий " + copies + " · В очереди " + queued + " · Не влезло " + left
+  );
+  const closed = Boolean(data.closed);
+  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  const unscheduled = Array.isArray(data.unscheduled) ? data.unscheduled : [];
+  const emptyPlan = !closed && tasks.length === 0 && unscheduled.length === 0 && positions === 0;
+  if (shiftEmptyEl) {
+    if (closed) {
+      setText(shiftEmptyEl, "Смена закрыта, следующий запуск завтра в 09:00");
+      shiftEmptyEl.hidden = false;
+    } else if (emptyPlan) {
+      setText(shiftEmptyEl, "Импортируйте план");
+      shiftEmptyEl.hidden = false;
+    } else {
+      shiftEmptyEl.hidden = true;
+    }
+  }
+  if (shiftPrintersWrapEl) shiftPrintersWrapEl.hidden = closed || tasks.length === 0;
+  if (shiftPrintersBodyEl) {
+    shiftPrintersBodyEl.textContent = "";
+    const sorted = tasks.slice().sort(function (a, b) {
+      return Number(a.start) - Number(b.start);
+    });
+    for (const task of sorted) {
+      const row = document.createElement("tr");
+      shiftAppendCell(row, task.printer || task.printer_key || "—");
+      shiftAppendCell(row, shiftFormatHM(task.start), "shift-num");
+      shiftAppendCell(row, shiftFormatFinish(task.start, task.finish), "shift-num");
+      shiftAppendCell(row, task.number === null || task.number === undefined ? "—" : task.number, "shift-num");
+      shiftAppendCell(row, task.name || task.part_key || "—", "shift-name");
+      shiftAppendCell(row, task.file_ready ? "готов" : "нужна загрузка", "shift-file");
+      row.className = task.file_ready ? "shift-ok" : "shift-need";
+      shiftPrintersBodyEl.appendChild(row);
+    }
+  }
+  if (shiftPrintersEmptyEl) shiftPrintersEmptyEl.hidden = closed || tasks.length > 0 || emptyPlan;
+  const hasUnscheduled = !closed && unscheduled.length > 0;
+  if (shiftUnscheduledWrapEl) shiftUnscheduledWrapEl.hidden = !hasUnscheduled;
+  if (shiftUnscheduledTitleEl) shiftUnscheduledTitleEl.hidden = !hasUnscheduled;
+  if (shiftUnscheduledEl) shiftUnscheduledEl.hidden = !hasUnscheduled;
+  if (shiftUnscheduledBodyEl) {
+    shiftUnscheduledBodyEl.textContent = "";
+    const sorted = unscheduled.slice().sort(function (a, b) {
+      return Number(a.number) - Number(b.number);
+    });
+    for (const item of sorted) {
+      const row = document.createElement("tr");
+      shiftAppendCell(row, item.number === null || item.number === undefined ? "—" : item.number, "shift-num");
+      shiftAppendCell(row, item.name || item.part_key || "—", "shift-name");
+      shiftAppendCell(row, item.remaining === null || item.remaining === undefined ? "—" : item.remaining, "shift-num");
+      shiftAppendCell(row, item.reason || "—");
+      shiftUnscheduledBodyEl.appendChild(row);
+    }
+  }
+  updateShiftButtons();
+}
+
+async function loadShift() {
+  if (!shiftDateEl) return;
+  if (state.shiftBusy) return;
+  if (!state.shiftDate) {
+    state.shiftDate = shiftTodayKey();
+    shiftDateEl.value = state.shiftDate;
+  }
+  const date = shiftDateEl.value || state.shiftDate;
+  state.shiftDate = date;
+  const token = state.shiftRequest + 1;
+  state.shiftRequest = token;
+  shiftSetBusy(true);
+  if (shiftStatusEl) {
+    setText(shiftStatusEl, "Загрузка…");
+    shiftStatusEl.hidden = false;
+  }
+  try {
+    const data = await requestJSON("/api/schedule?date=" + encodeURIComponent(date), { timeout: API_TIMEOUT_MS });
+    if (token !== state.shiftRequest) return;
+    state.shiftData = data && typeof data === "object" ? data : null;
+    if (shiftStatusEl) shiftStatusEl.hidden = true;
+    renderShift();
+  } catch (error) {
+    if (token !== state.shiftRequest) return;
+    if (shiftStatusEl) {
+      setText(shiftStatusEl, errorText(error, "Не удалось загрузить смену."));
+      shiftStatusEl.hidden = false;
+    }
+    toast(errorText(error, "Не удалось загрузить смену."), "error");
+  } finally {
+    if (token !== state.shiftRequest) return;
+    shiftSetBusy(false);
+  }
+}
+
+async function shiftUpload() {
+  if (state.shiftBusy) return;
+  const missing = shiftMissingTasks();
+  if (!missing.length) {
+    toast("Все файлы на месте.", "info");
+    return;
+  }
+  const parts = [];
+  const printers = [];
+  for (const task of missing) {
+    const part = String(task.part_key || "");
+    const printer = String(task.printer_key || "");
+    if (part && parts.indexOf(part) === -1) parts.push(part);
+    if (printer && printers.indexOf(printer) === -1) printers.push(printer);
+  }
+  if (!parts.length || !printers.length) {
+    toast("Нет файлов для загрузки.", "warn");
+    return;
+  }
+  shiftSetBusy(true);
+  try {
+    await requestJSON("/api/files/upload", {
+      method: "POST",
+      body: { parts: parts, printers: printers },
+      timeout: FS_TIMEOUT_MS,
+    });
+    toast("Файлы разложены.");
+    shiftSetBusy(false);
+    await loadShift();
+  } catch (error) {
+    shiftSetBusy(false);
+    toast(errorText(error, "Не удалось разложить файлы."), "error");
+  }
+}
+
+async function shiftApply() {
+  if (state.shiftBusy) return;
+  const data = state.shiftData;
+  if (!data || !Array.isArray(data.tasks) || !data.tasks.length) {
+    toast("Нет заданий для утверждения.", "warn");
+    return;
+  }
+  shiftSetBusy(true);
+  try {
+    await requestJSON("/api/schedule/apply", {
+      method: "POST",
+      body: { date: state.shiftDate, tasks: data.tasks },
+      timeout: API_TIMEOUT_MS,
+    });
+    toast("Смена утверждена.");
+  } catch (error) {
+    toast(errorText(error, "Не удалось утвердить смену."), "error");
+  } finally {
+    shiftSetBusy(false);
+  }
+}
+
 function showTab(name) {
   const next = TABS.indexOf(name) === -1 ? "overview" : name;
   for (const el of document.querySelectorAll("[data-tab]")) {
@@ -2454,6 +2713,7 @@ function showTab(name) {
   if (next === "plan" && typeof openPlanTab === "function") openPlanTab();
   if (next === "files") loadCatalog();
   if (next === "log") loadJournal();
+  if (next === "shift") loadShift();
 }
 
 function historyBounds(range) {
@@ -4811,6 +5071,23 @@ function init() {
   fileDeleteSelectedEl = document.getElementById("file-delete-selected");
   fileDeleteAllEl = document.getElementById("file-delete-all");
   fileSyncEl = document.getElementById("file-sync");
+  shiftDateEl = document.getElementById("shift-date");
+  shiftTodayEl = document.getElementById("shift-today");
+  shiftRefreshEl = document.getElementById("shift-refresh");
+  shiftSummaryEl = document.getElementById("shift-summary");
+  shiftWindowEl = document.getElementById("shift-window");
+  shiftStatusEl = document.getElementById("shift-status");
+  shiftEmptyEl = document.getElementById("shift-empty");
+  shiftPrintersEl = document.getElementById("shift-printers");
+  shiftPrintersBodyEl = document.getElementById("shift-printers-body");
+  shiftPrintersEmptyEl = document.getElementById("shift-printers-empty");
+  shiftPrintersWrapEl = document.getElementById("shift-printers-wrap");
+  shiftUnscheduledEl = document.getElementById("shift-unscheduled");
+  shiftUnscheduledBodyEl = document.getElementById("shift-unscheduled-body");
+  shiftUnscheduledWrapEl = document.getElementById("shift-unscheduled-wrap");
+  shiftUnscheduledTitleEl = document.getElementById("shift-unscheduled-title");
+  shiftUploadEl = document.getElementById("shift-upload");
+  shiftApplyEl = document.getElementById("shift-apply");
   qcOpenEl = document.getElementById("qc-open");
   qcDateEl = document.getElementById("qc-date");
   qcPrevEl = document.getElementById("qc-prev");
@@ -5052,6 +5329,24 @@ function init() {
   if (fileSyncEl) fileSyncEl.addEventListener("click", function () {
     loadCatalog();
   });
+  if (shiftDateEl) {
+    state.shiftDate = shiftTodayKey();
+    shiftDateEl.value = state.shiftDate;
+    shiftDateEl.addEventListener("change", function () {
+      loadShift();
+    });
+  }
+  if (shiftRefreshEl) shiftRefreshEl.addEventListener("click", function () {
+    loadShift();
+  });
+  if (shiftTodayEl) shiftTodayEl.addEventListener("click", function () {
+    if (!shiftDateEl) return;
+    state.shiftDate = shiftTodayKey();
+    shiftDateEl.value = state.shiftDate;
+    loadShift();
+  });
+  if (shiftUploadEl) shiftUploadEl.addEventListener("click", shiftUpload);
+  if (shiftApplyEl) shiftApplyEl.addEventListener("click", shiftApply);
   if (matrixHeadEl) matrixHeadEl.addEventListener("change", function (event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || target.localName !== "input") return;

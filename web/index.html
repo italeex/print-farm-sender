@@ -244,7 +244,38 @@
 
   <section class="tab-panel" id="panel-shift" data-panel="shift" role="tabpanel" aria-labelledby="tab-shift" hidden>
     <h2>Смена</h2>
-    <p class="tab-note">Скоро здесь появится смена.</p>
+    <div class="shift-toolbar">
+      <input class="shift-date" id="shift-date" type="date" aria-label="Дата смены">
+      <button class="btn ghost" id="shift-today" type="button">Сегодня</button>
+      <button class="btn ghost" id="shift-refresh" type="button">Пересчитать</button>
+      <span class="spacer"></span>
+      <span class="shift-window" id="shift-window" aria-label="Окно смены">09:00–18:00</span>
+    </div>
+    <p class="tab-note" id="shift-summary" role="status">—</p>
+    <p class="tab-note" id="shift-status" role="status" hidden>Загрузка…</p>
+    <p class="catalog-empty" id="shift-empty" hidden>Импортируйте план</p>
+    <div class="shift-wrap" id="shift-printers-wrap">
+      <table class="shift-table" id="shift-printers">
+        <thead>
+          <tr><th scope="col">Принтер</th><th scope="col">Старт</th><th scope="col">Финиш</th><th scope="col">Номер</th><th scope="col">Позиция</th><th scope="col">Файл</th></tr>
+        </thead>
+        <tbody id="shift-printers-body"></tbody>
+      </table>
+      <p class="catalog-empty" id="shift-printers-empty" hidden>Нет заданий на смену</p>
+    </div>
+    <h3 class="shift-sub" id="shift-unscheduled-title">Не влезло</h3>
+    <div class="shift-wrap" id="shift-unscheduled-wrap">
+      <table class="shift-table" id="shift-unscheduled">
+        <thead>
+          <tr><th scope="col">Номер</th><th scope="col">Позиция</th><th scope="col">Остаток</th><th scope="col">Причина</th></tr>
+        </thead>
+        <tbody id="shift-unscheduled-body"></tbody>
+      </table>
+    </div>
+    <div class="shift-actions">
+      <button class="btn primary" id="shift-upload" type="button">Разложить файлы</button>
+      <button class="btn" id="shift-apply" type="button">Утвердить смену</button>
+    </div>
   </section>
 
   <section class="tab-panel" id="panel-printers" data-panel="printers" role="tabpanel" aria-labelledby="tab-printers" hidden>
