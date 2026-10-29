@@ -4491,14 +4491,17 @@ async function fileRefreshMissing() {
   const jobs = [];
   const skipped = [];
   for (const item of parts) {
-    const need = printers.filter(function (key) {
+    const part = String(item.part_key);
+    const split = splitPrintingPrinters(part, printers);
+    for (const key of split.skipped) skipped.push(fileSkippedRow(key, part));
+    const need = split.targets.filter(function (key) {
       const per = (state.catalogStatuses || {})[key] || {};
       const status = per[item.part_key];
       return status === "missing" || status === "stale";
     });
-    if (need.length) jobs.push({ part: String(item.part_key), printers: need });
+    if (need.length) jobs.push({ part: part, printers: need });
   }
-  if (!jobs.length) {
+  if (!jobs.length && !skipped.length) {
     toast("Всё актуально.", "info");
     return;
   }
