@@ -221,6 +221,23 @@ let printingPartsBodyEl = null;
 let printingPrintersSection = null;
 let printingPrintersBodyEl = null;
 let printingEmptyEl = null;
+let modalQc = null;
+let qcSummaryEl = null;
+let qcOpenEl = null;
+let qcDateEl = null;
+let qcPrevEl = null;
+let qcNextEl = null;
+let qcTodayEl = null;
+let qcTableEl = null;
+let qcBodyEl = null;
+let qcEmptyEl = null;
+let qcTotalsEl = null;
+let qcCopyEl = null;
+let qcCsvEl = null;
+let qcPrintEl = null;
+let qcDate = "";
+let qcItems = [];
+let qcRequest = 0;
 function pick(root, selectors) {
   for (const selector of selectors) {
     const found = root.querySelector(selector);
@@ -3474,6 +3491,148 @@ function openPrintingModal() {
   renderPrintingModal(activePrinting());
 }
 
+function qcTodayKey() {
+  const now = new Date();
+  return now.getFullYear() + "-" + planPad(now.getMonth() + 1) + "-" + planPad(now.getDate());
+}
+
+function qcDateLabel(key) {
+  const date = planDay(key);
+  if (!date) return key || "—";
+  return date.getDate() + " " + PLAN_MONTHS_GEN[date.getMonth()] + " " + date.getFullYear();
+}
+
+function qcPositionText(item) {
+  const name = item && item.name ? String(item.name) : "";
+  const code = item && item.code ? String(item.code) : "";
+  let base = name || code;
+  if (name && code && code !== name) base = code + " · " + name;
+  const number = item ? item.number : null;
+  if (number !== null && number !== undefined && String(number).trim() !== "") {
+    return "Номер " + String(number).trim() + (base ? " · " + base : "");
+  }
+  return base || "—";
+}
+
+function renderQc(data) {
+  const items = data && Array.isArray(data.items) ? data.items.filter(Boolean) : [];
+  qcItems = items;
+  let total = 0;
+  for (const item of items) total += Number(item.count) || 0;
+  const positions = data && Number.isFinite(Number(data.positions)) ? Number(data.positions) : items.length;
+  const details = data && Number.isFinite(Number(data.total)) ? Number(data.total) : total;
+  const text = "Позиций: " + positions + " · Деталей: " + details;
+  setText(qcTotalsEl, text);
+  setText(qcSummaryEl, text);
+  setText(qcDateEl, qcDateLabel(qcDate));
+  if (qcBodyEl) {
+    qcBodyEl.textContent = "";
+    for (const item of items) {
+      const row = document.createElement("tr");
+      const nameCell = document.createElement("td");
+      nameCell.className = "qc-name";
+      nameCell.textContent = qcPositionText(item);
+      nameCell.title = nameCell.textContent;
+      const countCell = document.createElement("td");
+      countCell.className = "qc-num";
+      countCell.textContent = String(Number(item.count) || 0);
+      row.appendChild(nameCell);
+      row.appendChild(countCell);
+      qcBodyEl.appendChild(row);
+    }
+  }
+  const empty = items.length === 0;
+  if (qcTableEl) qcTableEl.hidden = empty;
+  if (qcEmptyEl) {
+    qcEmptyEl.hidden = !empty;
+    if (empty) setText(qcEmptyEl, "За период ничего не завершено");
+  }
+}
+
+async function loadQc() {
+  if (!qcDate) qcDate = qcTodayKey();
+  const token = qcRequest + 1;
+  qcRequest = token;
+  setText(qcDateEl, qcDateLabel(qcDate));
+  if (qcTotalsEl) setText(qcTotalsEl, "Загрузка…");
+  try {
+    const data = await requestJSON("/api/qc?date=" + encodeURIComponent(qcDate), { timeout: 6000 });
+    if (token !== qcRequest) return;
+    renderQc(data || {});
+  } catch (error) {
+    if (token !== qcRequest) return;
+    qcItems = [];
+    if (qcBodyEl) qcBodyEl.textContent = "";
+    if (qcTableEl) qcTableEl.hidden = true;
+    if (qcEmptyEl) {
+      qcEmptyEl.hidden = false;
+      setText(qcEmptyEl, "Не удалось загрузить список.");
+    }
+    setText(qcTotalsEl, "Позиций: 0 · Деталей: 0");
+    toast(errorText(error, "Не удалось загрузить ОТК."), "error");
+  }
+}
+
+function openQc() {
+  if (!modalQc) return;
+  if (!qcDate) qcDate = qcTodayKey();
+  openModal(modalQc);
+  loadQc();
+}
+
+function qcShift(offset) {
+  const date = planDay(qcDate) || new Date();
+  const next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset);
+  qcDate = next.getFullYear() + "-" + planPad(next.getMonth() + 1) + "-" + planPad(next.getDate());
+  loadQc();
+}
+
+function qcCopyText() {
+  return qcItems
+    .map(function (item) {
+      return qcPositionText(item) + " — " + String(Number(item.count) || 0);
+    })
+    .join("\n");
+}
+
+function qcFallbackCopy(text) {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  toast(ok ? "Скопировано." : "Не удалось скопировать.", ok ? "info" : "error");
+}
+
+function copyQc() {
+  const text = qcCopyText();
+  if (!text) {
+    toast("Нечего копировать.", "warn");
+    return;
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      function () {
+        toast("Скопировано.");
+      },
+      function () {
+        qcFallbackCopy(text);
+      }
+    );
+    return;
+  }
+  qcFallbackCopy(text);
+}
+
 function adviceRemaining(item) {
   const target = Number(item ? item.target : 0) || 0;
   const actual = Number(item ? item.actual : 0) || 0;
@@ -3882,6 +4041,20 @@ function init() {
   adviceEl = document.getElementById("advice");
   adviceListEl = document.getElementById("advice-list");
   adviceEmptyEl = document.getElementById("advice-empty");
+  modalQc = document.getElementById("modal-qc");
+  qcSummaryEl = document.getElementById("qc-summary");
+  qcOpenEl = document.getElementById("qc-open");
+  qcDateEl = document.getElementById("qc-date");
+  qcPrevEl = document.getElementById("qc-prev");
+  qcNextEl = document.getElementById("qc-next");
+  qcTodayEl = document.getElementById("qc-today");
+  qcTableEl = document.getElementById("qc-table");
+  qcBodyEl = document.getElementById("qc-body");
+  qcEmptyEl = document.getElementById("qc-empty");
+  qcTotalsEl = document.getElementById("qc-totals");
+  qcCopyEl = document.getElementById("qc-copy");
+  qcCsvEl = document.getElementById("qc-csv");
+  qcPrintEl = document.getElementById("qc-print");
 
   if (searchEl) {
     searchEl.addEventListener("input", function () {
@@ -4048,6 +4221,24 @@ function init() {
   if (planButtonEl) planButtonEl.addEventListener("click", function () {
     showTab("plan");
   });
+  if (qcOpenEl) qcOpenEl.addEventListener("click", openQc);
+  if (qcPrevEl) qcPrevEl.addEventListener("click", function () {
+    qcShift(-1);
+  });
+  if (qcNextEl) qcNextEl.addEventListener("click", function () {
+    qcShift(1);
+  });
+  if (qcTodayEl) qcTodayEl.addEventListener("click", function () {
+    qcDate = qcTodayKey();
+    loadQc();
+  });
+  if (qcCopyEl) qcCopyEl.addEventListener("click", copyQc);
+  if (qcCsvEl) qcCsvEl.addEventListener("click", function () {
+    window.location.href = "/api/qc.csv?date=" + encodeURIComponent(qcDate || qcTodayKey());
+  });
+  if (qcPrintEl) qcPrintEl.addEventListener("click", function () {
+    window.print();
+  });
   if (printingButtonEl) printingButtonEl.addEventListener("click", openPrintingModal);
   const advicePlanButton = document.getElementById("advice-plan");
   if (advicePlanButton) advicePlanButton.addEventListener("click", function () {
@@ -4109,6 +4300,8 @@ function init() {
   restoreGrouped();
   renderFilesStrip();
   showTab((location.hash || "").replace("#/", ""));
+  qcDate = qcTodayKey();
+  loadQc();
   fetchState();
   loadJournal();
   loadPlan();

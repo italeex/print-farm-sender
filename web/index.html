@@ -88,6 +88,15 @@
     <p class="advice-empty" id="advice-empty" hidden></p>
   </section>
 
+  <section class="qc-card" id="qc-card" aria-label="ОТК">
+    <div class="qc-head">
+      <h2>ОТК</h2>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="qc-open" type="button">Список ОТК</button>
+    </div>
+    <p class="qc-summary" id="qc-summary">Загрузка…</p>
+  </section>
+
   <section class="toolbar" id="toolbar" aria-label="Поиск и действия">
     <div class="search">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -453,6 +462,41 @@
     </div>
     <footer class="modal-foot">
       <span class="spacer"></span>
+      <button class="btn" type="button" data-close>Закрыть</button>
+    </footer>
+  </div>
+</div>
+
+<div class="modal" id="modal-qc" role="dialog" aria-modal="true" aria-labelledby="modal-qc-title" hidden>
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2 id="modal-qc-title">ОТК</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Закрыть">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="qc-nav">
+        <button class="icon-btn" id="qc-prev" type="button" aria-label="Предыдущий день">‹</button>
+        <span class="qc-date" id="qc-date" aria-live="polite">—</span>
+        <button class="icon-btn" id="qc-next" type="button" aria-label="Следующий день">›</button>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="qc-today" type="button">Сегодня</button>
+      </div>
+      <div class="qc-table-wrap">
+        <table class="qc-table" id="qc-table">
+          <thead>
+            <tr><th scope="col">Позиция</th><th scope="col">Количество</th></tr>
+          </thead>
+          <tbody id="qc-body"></tbody>
+        </table>
+        <p class="qc-empty" id="qc-empty" hidden>За период ничего не завершено</p>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span id="qc-totals">Позиций: 0 · Деталей: 0</span>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="qc-copy" type="button">Копировать</button>
+      <button class="btn ghost" id="qc-csv" type="button">CSV</button>
+      <button class="btn ghost" id="qc-print" type="button">Печать</button>
       <button class="btn" type="button" data-close>Закрыть</button>
     </footer>
   </div>
