@@ -102,12 +102,12 @@ class BuildScheduleTests(unittest.TestCase):
         self.assertEqual(len(out["tasks"]), 1)
         self.assertFalse(out["tasks"][0]["file_ready"])
 
-    def test_file_not_ready_without_estimate(self):
+    def test_missing_estimate_reason(self):
         out = build_schedule(NOW, DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 3}],
                              [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
                              {"p1": {"a"}}, {})
         self.assertEqual(out["tasks"], [])
-        self.assertEqual(out["unscheduled"][0]["reason"], "файл не готов")
+        self.assertEqual(out["unscheduled"][0]["reason"], "нет оценки длительности")
         self.assertEqual(out["unscheduled"][0]["remaining"], 3)
 
     def test_nothing_fits(self):
@@ -132,6 +132,35 @@ class BuildScheduleTests(unittest.TestCase):
         self.assertEqual(out["tasks"], [])
         self.assertEqual(out["unscheduled"][0]["reason"], "смена закрыта")
         self.assertEqual(out["unscheduled"][0]["remaining"], 2)
+
+    def test_empty_printers(self):
+        out = build_schedule(NOW, DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 2}],
+                             [], {}, {"a": 3600})
+        self.assertEqual(out["tasks"], [])
+        self.assertEqual(out["unscheduled"][0]["reason"], "нет свободных принтеров до 18:00")
+        self.assertEqual(out["unscheduled"][0]["remaining"], 2)
+        self.assertEqual(out["totals"], {"positions": 1, "copies": 2, "scheduled": 0, "unscheduled": 2})
+
+    def test_nonpositive_remaining_skipped(self):
+        out = build_schedule(NOW, DATE,
+                             [{"part_key": "a", "number": 1, "name": "A", "remaining": 0},
+                              {"part_key": "b", "number": 2, "name": "B", "remaining": -3}],
+                             [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
+                             {"p1": {"a", "b"}}, {"a": 3600, "b": 3600})
+        self.assertEqual(out["tasks"], [])
+        self.assertEqual(out["unscheduled"], [])
+        self.assertEqual(out["totals"], {"positions": 2, "copies": 0, "scheduled": 0, "unscheduled": 0})
+
+    def test_duplicate_positions_counted_separately(self):
+        items = [{"part_key": "a", "number": 1, "name": "A", "remaining": 2},
+                 {"part_key": "a", "number": 1, "name": "A", "remaining": 2}]
+        out = build_schedule(at("17:00"), DATE, items,
+                             [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
+                             {"p1": {"a"}}, {"a": 3600})
+        self.assertEqual(len(out["tasks"]), 1)
+        self.assertEqual(len(out["unscheduled"]), 2)
+        self.assertEqual([u["remaining"] for u in out["unscheduled"]], [1, 2])
+        self.assertEqual(out["totals"], {"positions": 2, "copies": 4, "scheduled": 1, "unscheduled": 3})
 
     def test_window_and_totals(self):
         out = build_schedule(NOW, DATE,

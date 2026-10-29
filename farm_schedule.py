@@ -35,11 +35,14 @@ def build_schedule(now, date, items, printers, ready, estimates):
     tasks = []
     pending = []
     for item in items:
+        if item["remaining"] <= 0:
+            continue
         estimate = estimates.get(item["part_key"])
         if estimate is None:
-            pending.append((item, item["remaining"], "файл не готов"))
+            pending.append((item, item["remaining"], "нет оценки длительности"))
             continue
         left = item["remaining"]
+        made = len(tasks)
         for _ in range(left):
             best = None
             for key, free_at in free.items():
@@ -62,11 +65,9 @@ def build_schedule(now, date, items, printers, ready, estimates):
                 "file_ready": item["part_key"] in (ready.get(best) or set()),
             })
             free[best] = finish
-        done = sum(1 for task in tasks if task["part_key"] == item["part_key"] and task["number"] == item["number"])
+        done = len(tasks) - made
         if done < left:
-            if estimates.get(item["part_key"]) is None:
-                reason = "файл не готов"
-            elif closed:
+            if closed:
                 reason = "смена закрыта"
             else:
                 reason = "нет свободных принтеров до 18:00"
@@ -76,7 +77,7 @@ def build_schedule(now, date, items, printers, ready, estimates):
          "remaining": count, "reason": reason}
         for item, count, reason in pending
     ]
-    copies = sum(item["remaining"] for item in items)
+    copies = sum(item["remaining"] for item in items if item["remaining"] > 0)
     scheduled = len(tasks)
     return {
         "date": date if isinstance(date, str) else day.isoformat(),
