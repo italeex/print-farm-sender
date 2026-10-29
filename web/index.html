@@ -153,7 +153,32 @@
 
   <section class="tab-panel" id="panel-files" data-panel="files" role="tabpanel" aria-labelledby="tab-files" hidden>
     <h2>Файлы</h2>
-    <p class="tab-note">Скоро здесь появятся файлы для отправки на принтеры.</p>
+    <div class="catalog-toolbar">
+      <div class="search">
+        <input id="catalog-search" type="search" placeholder="Поиск по номеру, позиции или файлу…" autocomplete="off" aria-label="Поиск по каталогу">
+      </div>
+      <label class="catalog-problems"><input class="check" id="catalog-problems" type="checkbox"> Только проблемы</label>
+      <span class="spacer"></span>
+      <span class="catalog-count" id="catalog-count">—</span>
+      <button class="btn ghost" id="catalog-sync" type="button">Обновить список</button>
+    </div>
+    <p class="tab-note" id="catalog-status" role="status" hidden>Загрузка…</p>
+    <div class="catalog-wrap">
+      <table class="catalog-table" id="catalog-table">
+        <thead>
+          <tr>
+            <th scope="col"><input class="check" id="catalog-select-all" type="checkbox" aria-label="Выбрать все позиции"></th>
+            <th scope="col">Номер</th>
+            <th scope="col">Позиция</th>
+            <th scope="col">Эталон</th>
+            <th scope="col">На принтерах</th>
+            <th scope="col"><span class="sr-only">Действия</span></th>
+          </tr>
+        </thead>
+        <tbody id="catalog-body"></tbody>
+      </table>
+      <p class="catalog-empty" id="catalog-empty" hidden>каталог пуст — импортируйте план</p>
+    </div>
   </section>
 
   <section class="tab-panel plan-tab" id="panel-plan" data-panel="plan" role="tabpanel" aria-labelledby="tab-plan" hidden>

@@ -72,6 +72,12 @@ const state = {
   grouped: false,
   tab: "overview",
   lastDir: "",
+  catalogItems: [],
+  catalogStatuses: {},
+  catalogQuery: "",
+  catalogProblems: false,
+  catalogChecked: new Set(),
+  catalogRequest: 0,
 };
 
 const cards = new Map();
@@ -239,6 +245,14 @@ let qcPrintEl = null;
 let qcDate = "";
 let qcItems = [];
 let qcRequest = 0;
+let catalogSearchEl = null;
+let catalogProblemsEl = null;
+let catalogSyncEl = null;
+let catalogCountEl = null;
+let catalogBodyEl = null;
+let catalogEmptyEl = null;
+let catalogStatusEl = null;
+let catalogSelectAllEl = null;
 function pick(root, selectors) {
   for (const selector of selectors) {
     const found = root.querySelector(selector);
@@ -2422,6 +2436,7 @@ function showTab(name) {
   if (journalToggleEl) journalToggleEl.setAttribute("aria-expanded", String(next === "log"));
   if (location.hash !== "#/" + next) history.replaceState(null, "", "#/" + next);
   if (next === "plan" && typeof openPlanTab === "function") openPlanTab();
+  if (next === "files") loadCatalog();
   if (next === "log") loadJournal();
 }
 
@@ -3824,6 +3839,299 @@ async function importPlan() {
   }
 }
 
+function catalogItem(key) {
+  for (const item of state.catalogItems || []) {
+    if (item && String(item.part_key) === String(key)) return item;
+  }
+  return null;
+}
+
+function catalogTotalPrinters() {
+  const keys = Object.keys(state.catalogStatuses || {});
+  if (keys.length) return keys.length;
+  return (state.printers || []).filter(function (view) {
+    return view && view.key;
+  }).length;
+}
+
+function catalogPresence(partKey) {
+  const statuses = state.catalogStatuses || {};
+  let good = 0;
+  let total = 0;
+  const bad = { missing: 0, stale: 0, printing: 0 };
+  for (const key of Object.keys(statuses)) {
+    const per = statuses[key] || {};
+    if (!Object.prototype.hasOwnProperty.call(per, partKey)) continue;
+    total += 1;
+    const value = per[partKey];
+    if (value === "ok" || value === "printing") good += 1;
+    if (value === "printing") bad.printing += 1;
+    else if (value === "missing") bad.missing += 1;
+    else if (value === "stale") bad.stale += 1;
+  }
+  return { good: good, total: total || catalogTotalPrinters(), missing: bad.missing, stale: bad.stale, printing: bad.printing };
+}
+
+function catalogIsProblem(item) {
+  if (!item || !item.file_path) return true;
+  const statuses = state.catalogStatuses || {};
+  for (const key of Object.keys(statuses)) {
+    const per = statuses[key] || {};
+    const value = per[item.part_key];
+    if (value === "missing" || value === "stale") return true;
+  }
+  return false;
+}
+
+function catalogFiltered() {
+  const query = String(state.catalogQuery || "").trim().toLowerCase();
+  return (state.catalogItems || []).filter(function (item) {
+    if (!item) return false;
+    if (state.catalogProblems && !catalogIsProblem(item)) return false;
+    if (!query) return true;
+    const haystack = [item.number, item.code, item.name, baseName(item.file_path || "")]
+      .filter(function (value) {
+        return value !== null && value !== undefined && String(value).trim() !== "";
+      })
+      .join(" ")
+      .toLowerCase();
+    return haystack.indexOf(query) !== -1;
+  });
+}
+
+function catalogPresenceTitle(partKey, presence) {
+  const total = presence.total || catalogTotalPrinters();
+  const bad = [];
+  if (presence.missing) bad.push("нет: " + presence.missing);
+  if (presence.stale) bad.push("устарели: " + presence.stale);
+  if (presence.printing) bad.push("печатаются: " + presence.printing);
+  return "Есть на " + presence.good + " из " + total + (bad.length ? " · " + bad.join(", ") : "");
+}
+
+async function loadCatalog() {
+  if (!catalogBodyEl) return;
+  const token = state.catalogRequest + 1;
+  state.catalogRequest = token;
+  if (catalogStatusEl) {
+    setText(catalogStatusEl, "Загрузка…");
+    catalogStatusEl.hidden = false;
+  }
+  if (catalogSyncEl) catalogSyncEl.disabled = true;
+  try {
+    const data = await requestJSON("/api/catalog?sync=1", { timeout: 8000 });
+    if (token !== state.catalogRequest) return;
+    const items = data && Array.isArray(data.items) ? data.items : [];
+    state.catalogItems = items.filter(Boolean);
+    state.catalogStatuses =
+      data && data.statuses && typeof data.statuses === "object" ? data.statuses : {};
+    renderCatalog();
+  } catch (error) {
+    if (token !== state.catalogRequest) return;
+    toast(errorText(error, "Не удалось загрузить каталог."), "error");
+  } finally {
+    if (token !== state.catalogRequest) return;
+    if (catalogStatusEl) catalogStatusEl.hidden = true;
+    if (catalogSyncEl) catalogSyncEl.disabled = false;
+  }
+}
+
+function catalogNumberCell(cell, item) {
+  cell.textContent = "";
+  cell.dataset.numberCell = String(item.part_key);
+  const text = document.createElement("span");
+  text.className = "catalog-num";
+  text.textContent = item.number === null || item.number === undefined ? "—" : String(item.number);
+  cell.appendChild(text);
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "mini";
+  edit.dataset.catalogNumber = String(item.part_key);
+  edit.title = "Изменить номер";
+  edit.setAttribute("aria-label", "Изменить номер позиции " + (item.name || item.part_key));
+  edit.textContent = "✎";
+  cell.appendChild(edit);
+}
+
+function startCatalogNumberEdit(cell, item) {
+  if (!cell || cell.querySelector("input")) return;
+  cell.textContent = "";
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.step = "1";
+  input.value = item.number === null || item.number === undefined ? "" : String(item.number);
+  input.setAttribute("aria-label", "Номер позиции " + (item.name || item.part_key));
+  cell.appendChild(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = function (save) {
+    if (done) return;
+    done = true;
+    if (save) saveCatalogNumber(item.part_key, input.value);
+    else renderCatalog();
+  };
+  input.addEventListener("keydown", function (event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      commit(false);
+    }
+  });
+  input.addEventListener("blur", function () {
+    commit(true);
+  });
+}
+
+async function saveCatalogNumber(partKey, raw) {
+  const text = String(raw === null || raw === undefined ? "" : raw).trim();
+  const number = Number(text);
+  if (!text || !Number.isInteger(number) || number <= 0) {
+    toast("Номер должен быть целым числом больше нуля.", "error");
+    renderCatalog();
+    return;
+  }
+  try {
+    await requestJSON("/api/catalog", { method: "POST", body: { part_key: partKey, number: number } });
+    toast("Номер сохранён.");
+    await loadCatalog();
+  } catch (error) {
+    toast(errorText(error, "Не удалось сохранить номер."), "error");
+    renderCatalog();
+  }
+}
+
+async function openCatalogFile(partKey) {
+  if (!partKey || browseBusy) return;
+  browseBusy = true;
+  try {
+    const data = await requestJSON("/api/fs/browse", {
+      method: "POST",
+      body: { initial_dir: state.lastDir || "" },
+      timeout: BROWSE_TIMEOUT_MS,
+    });
+    const dir = data && typeof data.dir === "string" ? data.dir : "";
+    if (dir) {
+      state.lastDir = dir;
+      lastFsPath = dir;
+    }
+    const paths = gcodePaths(data);
+    if (!paths.length) {
+      if (data && data.cancelled) toast("Диалог закрыт без выбора.", "warn");
+      else toast("Файлы .gcode не выбраны.", "warn");
+      return;
+    }
+    try {
+      await requestJSON("/api/catalog", { method: "POST", body: { part_key: partKey, file_path: paths[0] } });
+      toast("Эталон сохранён: " + baseName(paths[0]));
+      await loadCatalog();
+    } catch (error) {
+      toast(errorText(error, "Не удалось сохранить эталон."), "error");
+    }
+  } catch (error) {
+    toast(errorText(error, "Не удалось открыть проводник."), "error");
+  } finally {
+    browseBusy = false;
+  }
+}
+
+function renderCatalog() {
+  if (!catalogBodyEl) return;
+  const rows = catalogFiltered();
+  const total = (state.catalogItems || []).length;
+  catalogBodyEl.textContent = "";
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    const checkCell = document.createElement("td");
+    checkCell.className = "catalog-check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "check";
+    box.dataset.catalogCheck = String(item.part_key);
+    box.checked = state.catalogChecked.has(item.part_key);
+    box.setAttribute("aria-label", "Выбрать " + (item.name || item.part_key));
+    checkCell.appendChild(box);
+    row.appendChild(checkCell);
+    const numberCell = document.createElement("td");
+    numberCell.className = "catalog-number";
+    catalogNumberCell(numberCell, item);
+    row.appendChild(numberCell);
+    const nameCell = document.createElement("td");
+    nameCell.className = "catalog-name";
+    const code = String(item.code || "").trim();
+    const name = String(item.name || item.part_key || "—");
+    nameCell.title = code ? code + (name && name !== code ? " · " + name : "") : name;
+    const nameText = document.createElement("b");
+    nameText.textContent = name;
+    nameCell.appendChild(nameText);
+    if (code && code !== name) {
+      const codeText = document.createElement("small");
+      codeText.textContent = code;
+      nameCell.appendChild(codeText);
+    }
+    row.appendChild(nameCell);
+    const refCell = document.createElement("td");
+    refCell.className = "catalog-ref";
+    if (item.file_path) {
+      refCell.title = String(item.file_path);
+      const fileName = document.createElement("b");
+      fileName.textContent = baseName(item.file_path);
+      refCell.appendChild(fileName);
+      if (Number.isFinite(Number(item.file_size)) && Number(item.file_size) > 0) {
+        const size = document.createElement("small");
+        size.textContent = formatBytes(item.file_size);
+        refCell.appendChild(size);
+      }
+    } else {
+      const missing = document.createElement("span");
+      missing.className = "muted";
+      missing.textContent = "не задан";
+      refCell.appendChild(missing);
+    }
+    row.appendChild(refCell);
+    const presence = catalogPresence(item.part_key);
+    const printersCell = document.createElement("td");
+    printersCell.className = "catalog-presence";
+    printersCell.title = catalogPresenceTitle(item.part_key, presence);
+    printersCell.textContent = presence.good + " из " + presence.total;
+    row.appendChild(printersCell);
+    const actionCell = document.createElement("td");
+    actionCell.className = "catalog-action";
+    const refButton = document.createElement("button");
+    refButton.type = "button";
+    refButton.className = "btn ghost";
+    refButton.dataset.catalogFile = String(item.part_key);
+    refButton.textContent = "Эталон…";
+    actionCell.appendChild(refButton);
+    row.appendChild(actionCell);
+    catalogBodyEl.appendChild(row);
+  }
+  if (catalogCountEl) {
+    if (rows.length === total) setText(catalogCountEl, "Позиций: " + total);
+    else setText(catalogCountEl, "Позиций: " + rows.length + " из " + total);
+  }
+  if (catalogEmptyEl) {
+    if (!total) {
+      setText(catalogEmptyEl, "каталог пуст — импортируйте план");
+      catalogEmptyEl.hidden = false;
+    } else if (!rows.length) {
+      setText(catalogEmptyEl, "Ничего не найдено.");
+      catalogEmptyEl.hidden = false;
+    } else {
+      catalogEmptyEl.hidden = true;
+    }
+  }
+  if (catalogSelectAllEl) {
+    const checked = rows.filter(function (item) {
+      return state.catalogChecked.has(item.part_key);
+    }).length;
+    catalogSelectAllEl.checked = rows.length > 0 && checked === rows.length;
+    catalogSelectAllEl.indeterminate = checked > 0 && checked < rows.length;
+  }
+}
+
 async function heartbeat() {
   try {
     await requestJSON("/api/heartbeat", { method: "POST", body: {}, timeout: 4000 });
@@ -4065,6 +4373,14 @@ function init() {
   adviceEmptyEl = document.getElementById("advice-empty");
   modalQc = document.getElementById("modal-qc");
   qcSummaryEl = document.getElementById("qc-summary");
+  catalogSearchEl = document.getElementById("catalog-search");
+  catalogProblemsEl = document.getElementById("catalog-problems");
+  catalogSyncEl = document.getElementById("catalog-sync");
+  catalogCountEl = document.getElementById("catalog-count");
+  catalogBodyEl = document.getElementById("catalog-body");
+  catalogEmptyEl = document.getElementById("catalog-empty");
+  catalogStatusEl = document.getElementById("catalog-status");
+  catalogSelectAllEl = document.getElementById("catalog-select-all");
   qcOpenEl = document.getElementById("qc-open");
   qcDateEl = document.getElementById("qc-date");
   qcPrevEl = document.getElementById("qc-prev");
@@ -4215,6 +4531,66 @@ function init() {
     });
   }
   if (fsConfirmEl) fsConfirmEl.addEventListener("click", confirmFiles);
+  if (catalogSearchEl) {
+    catalogSearchEl.addEventListener("input", function () {
+      state.catalogQuery = catalogSearchEl.value || "";
+      renderCatalog();
+    });
+  }
+  if (catalogProblemsEl) {
+    catalogProblemsEl.addEventListener("change", function () {
+      state.catalogProblems = catalogProblemsEl.checked;
+      renderCatalog();
+    });
+  }
+  if (catalogSyncEl) {
+    catalogSyncEl.addEventListener("click", function () {
+      loadCatalog();
+    });
+  }
+  if (catalogSelectAllEl) {
+    catalogSelectAllEl.addEventListener("change", function () {
+      const rows = catalogFiltered();
+      if (catalogSelectAllEl.checked) {
+        for (const item of rows) state.catalogChecked.add(item.part_key);
+      } else {
+        for (const item of rows) state.catalogChecked.delete(item.part_key);
+      }
+      renderCatalog();
+    });
+  }
+  if (catalogBodyEl) {
+    catalogBodyEl.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const numberButton = target.closest("[data-catalog-number]");
+      if (numberButton) {
+        const key = numberButton.getAttribute("data-catalog-number") || "";
+        const item = catalogItem(key);
+        const row = numberButton.closest("tr");
+        const cell = row ? row.querySelector("[data-number-cell]") : null;
+        if (cell && item) startCatalogNumberEdit(cell, item);
+        return;
+      }
+      const fileButton = target.closest("[data-catalog-file]");
+      if (fileButton) openCatalogFile(fileButton.getAttribute("data-catalog-file") || "");
+    });
+    catalogBodyEl.addEventListener("dblclick", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      const cell = target ? target.closest("[data-number-cell]") : null;
+      if (!cell) return;
+      const item = catalogItem(cell.getAttribute("data-number-cell") || "");
+      if (item) startCatalogNumberEdit(cell, item);
+    });
+    catalogBodyEl.addEventListener("change", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || target.localName !== "input") return;
+      const key = target.getAttribute("data-catalog-check");
+      if (!key) return;
+      if (target.checked) state.catalogChecked.add(key);
+      else state.catalogChecked.delete(key);
+    });
+  }
 
   if (printerForm) printerForm.addEventListener("submit", savePrinter);
   if (printerResetEl) printerResetEl.addEventListener("click", resetPrinterForm);
