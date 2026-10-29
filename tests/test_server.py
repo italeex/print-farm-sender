@@ -2027,6 +2027,28 @@ class ScheduleApiTests(unittest.TestCase):
         self.assertEqual(current["totals"]["copies"], 3)
         self.assertEqual(current["totals"]["scheduled"], 3)
 
+    def test_get_sorts_day_by_remaining_then_week(self):
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        other = monday if monday != today else monday + timedelta(days=1)
+        self.history.import_plan(
+            [
+                {"date": today.isoformat(), "key": "A", "code": "A", "name": "A", "target": 1},
+                {"date": today.isoformat(), "key": "B", "code": "B", "name": "B", "target": 4},
+                {"date": other.isoformat(), "key": "C", "code": "C", "name": "C", "target": 2},
+            ]
+        )
+        for key in ("A", "B", "C"):
+            self.add_reference(key)
+            self.add_duration(key, 60)
+        sked = (today + timedelta(days=1)).isoformat()
+        response = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [task["part_key"] for task in response.json()["tasks"]],
+            ["B", "B", "B", "B", "A", "C", "C"],
+        )
+
     def test_get_estimate_median_vs_default(self):
         today = date.today()
         self.history.import_plan(

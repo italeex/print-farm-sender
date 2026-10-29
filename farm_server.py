@@ -967,12 +967,12 @@ class FarmHandler(BaseHTTPRequestHandler):
         from farm_history import _day_of as _schedule_day_of
         is_today = day == _schedule_day_of(now)
         included: set[str] = set()
-        items = []
-        scopes = [
-            (plan.get("day", {}) or {}).get("items") or [],
-            (plan.get("week", {}) or {}).get("items") or [],
-        ]
-        for scope in scopes:
+        day_items = []
+        week_items = []
+        day_scope = (plan.get("day", {}) or {}).get("items") or []
+        week_scope = (plan.get("week", {}) or {}).get("items") or []
+        scopes = [(day_items, day_scope), (week_items, week_scope)]
+        for target, scope in scopes:
             for entry in scope:
                 if not isinstance(entry, dict):
                     continue
@@ -1005,8 +1005,20 @@ class FarmHandler(BaseHTTPRequestHandler):
                     number = int(number) if number is not None else None
                 except (TypeError, ValueError):
                     number = None
-                items.append({"part_key": key, "number": number, "name": name, "remaining": remaining})
+                target.append({"part_key": key, "number": number, "name": name, "remaining": remaining})
                 included.add(key)
+        def _sort_key(entry):
+            value, _ = estimate_seconds(durations.get(entry["part_key"]) or [])
+            number = entry.get("number")
+            return (
+                -int(entry.get("remaining") or 0),
+                -float(value),
+                int(number) if number is not None else 0,
+                str(entry.get("name") or ""),
+            )
+        day_items.sort(key=_sort_key)
+        week_items.sort(key=_sort_key)
+        items = day_items + week_items
         views = self.app.monitor.snapshot().get("printers") or []
         printers = []
         current: dict[str, str] = {}
