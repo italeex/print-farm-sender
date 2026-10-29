@@ -74,6 +74,7 @@ const state = {
   lastDir: "",
   catalogItems: [],
   catalogStatuses: {},
+  catalogCheckedAt: {},
   catalogQuery: "",
   catalogProblems: false,
   catalogChecked: new Set(),
@@ -218,6 +219,7 @@ let overviewProgressEl = null;
 let planProgressEl = null;
 const planCalendarCache = new Map();
 const PLAN_CACHE_TTL_MS = 15000;
+const CATALOG_STALE_SECONDS = 600;
 let modalPrinting = null;
 let adviceEl = null;
 let adviceListEl = null;
@@ -3938,6 +3940,8 @@ async function loadCatalog() {
     state.catalogItems = items.filter(Boolean);
     state.catalogStatuses =
       data && data.statuses && typeof data.statuses === "object" ? data.statuses : {};
+    state.catalogCheckedAt =
+      data && data.checked_at && typeof data.checked_at === "object" ? data.checked_at : {};
     renderCatalog();
   } catch (error) {
     if (token !== state.catalogRequest) return;
@@ -4214,12 +4218,23 @@ function matrixStatusLabel(status) {
   return "—";
 }
 
-function matrixCellTitle(status, remote) {
-  if (status === "ok") return "ок · файл " + remote + " совпадает с эталоном";
-  if (status === "stale") return "устарел · файл " + remote + " отличается от эталона";
-  if (status === "missing") return "нет · файла " + remote + " нет на принтере";
-  if (status === "printing") return "печатается · файл " + remote + " сейчас печатается";
-  return "нет данных";
+function matrixCheckedSuffix(key) {
+  const checked = state.catalogCheckedAt || {};
+  const number = Number(checked[key]);
+  if (!Number.isFinite(number) || number <= 0) return " · данные не проверялись";
+  const stale = Date.now() / 1000 - number > CATALOG_STALE_SECONDS;
+  const clock = formatClock(number);
+  const when = clock || formatAgo(number);
+  return " · прочитано " + when + (stale ? " · данные устарели" : "");
+}
+
+function matrixCellTitle(status, remote, key) {
+  const suffix = matrixCheckedSuffix(key);
+  if (status === "ok") return "ок · файл " + remote + " совпадает с эталоном" + suffix;
+  if (status === "stale") return "устарел · файл " + remote + " отличается от эталона" + suffix;
+  if (status === "missing") return "нет · файла " + remote + " нет на принтере" + suffix;
+  if (status === "printing") return "печатается · файл " + remote + " сейчас печатается" + suffix;
+  return "нет данных" + suffix;
 }
 
 function matrixCellStatus(key, partKey) {
@@ -4308,7 +4323,7 @@ function renderFileMatrix() {
       const mark = document.createElement("span");
       mark.className = "matrix-cell" + (status ? " matrix-" + status : "");
       mark.textContent = matrixStatusLabel(status);
-      mark.title = matrixCellTitle(status, remote || "—");
+      mark.title = matrixCellTitle(status, remote || "—", key);
       cell.appendChild(mark);
       row.appendChild(cell);
     }

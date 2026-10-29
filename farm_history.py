@@ -1186,6 +1186,21 @@ class HistoryStore:
             self._conn.commit()
         return {"printer_key": key, "mode": value, "checked_at": stamp}
 
+    def files_checked(self) -> dict:
+        with self._lock:
+            self._ensure_files_schema_locked()
+            rows = self._conn.execute(
+                "SELECT printer_key, checked_at FROM printer_files"
+            ).fetchall()
+        result: dict = {}
+        for row in rows:
+            try:
+                stamp = float(row["checked_at"])
+            except (TypeError, ValueError):
+                stamp = 0.0
+            result[str(row["printer_key"])] = stamp
+        return result
+
     def _ensure_files_schema_locked(self) -> None:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS file_registry ("

@@ -601,7 +601,13 @@ class FarmHandler(BaseHTTPRequestHandler):
         if self._query_text(query, "sync") != "1":
             self._send_json({"items": items})
             return
-        self._send_json({"items": items, "statuses": self._catalog_statuses()})
+        self._send_json(
+            {
+                "items": items,
+                "statuses": self._catalog_statuses(),
+                "checked_at": self.app.history.files_checked(),
+            }
+        )
 
     def _file_views(self) -> dict:
         try:
@@ -705,6 +711,14 @@ class FarmHandler(BaseHTTPRequestHandler):
                     "files": [],
                 }
                 continue
+            if mode == "folder" and not files:
+                try:
+                    prefixed = list_farm(printer, "prefix")
+                except (FarmFileError, Exception):
+                    prefixed = None
+                if prefixed:
+                    mode = "prefix"
+                    files = prefixed
             now = time.time()
             entries = [
                 {
@@ -822,23 +836,35 @@ class FarmHandler(BaseHTTPRequestHandler):
 
     def _delete_one(self, printer, key: str, part: str, remote: str) -> dict:
         mode = self.app.history.printer_mode(key)
-        try:
-            delete_from_farm(printer, [remote], mode)
-        except FarmFileError as exc:
-            return {"printer": key, "part": part, "ok": False, "error": str(exc)}
-        except Exception as exc:
-            return {
-                "printer": key,
-                "part": part,
-                "ok": False,
-                "error": str(exc) or f"Не удалось удалить файл {remote}",
-            }
+        used = None
+        for candidate in (mode, "prefix" if mode == "folder" else "folder"):
+            try:
+                deleted = delete_from_farm(printer, [remote], candidate)
+            except FarmFileError as exc:
+                return {"printer": key, "part": part, "ok": False, "error": str(exc)}
+            except Exception as exc:
+                return {
+                    "printer": key,
+                    "part": part,
+                    "ok": False,
+                    "error": str(exc) or f"Не удалось удалить файл {remote}",
+                }
+            if deleted:
+                used = candidate
+                break
         now = time.time()
         with FILES_LOCK:
             current = self.app.history.registry().get(key, {})
             current.pop(remote, None)
             self.app.history.set_registry(key, list(current.values()))
-            self.app.history.printer_files(key, mode, now)
+            self.app.history.printer_files(key, used or mode, now)
+        if used is None:
+            return {
+                "printer": key,
+                "part": part,
+                "ok": False,
+                "error": f"Файл не найден на принтере: {remote}",
+            }
         return {"printer": key, "part": part, "ok": True}
 
     def _api_files_upload(self) -> None:

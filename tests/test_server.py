@@ -1532,6 +1532,74 @@ class FileApiTests(unittest.TestCase):
         self.assertIn("N1.gcode", registry[self.key_a])
         self.assertEqual(self.history.printer_mode(self.key_a), "folder")
 
+    def test_sync_detects_prefix_namespace(self):
+        from farm_files import FarmFileError
+
+        self.moon_a.folder_broken = True
+        self.moon_a.store = {"FARM_N7.gcode": b"data"}
+        response = requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["printers"][self.key_a]
+        self.assertTrue(payload["ok"])
+        self.assertEqual([item["name"] for item in payload["files"]], ["N7.gcode"])
+        self.assertEqual(self.history.printer_mode(self.key_a), "prefix")
+        checked = self.history.files_checked()
+        self.assertGreater(checked.get(self.key_a, 0.0), 0.0)
+
+    def test_sync_keeps_folder_mode_on_transient_error(self):
+        from farm_files import FarmFileError
+
+        self.moon_a.store = {"FARM/N1.gcode": b"data"}
+        with mock.patch("farm_server.list_farm", side_effect=FarmFileError("сеть")):
+            response = requests.post(
+                self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["printers"][self.key_a]
+        self.assertFalse(payload["ok"])
+        self.assertEqual(self.history.printer_mode(self.key_a), "folder")
+
+    def test_delete_falls_back_to_other_namespace(self):
+        self.history.set_catalog("part-one", number=7, file_path=str(self.ref_a))
+        self.moon_a.store = {"FARM_N7.gcode": b"data"}
+        self.assertEqual(self.history.printer_mode(self.key_a), "folder")
+        response = requests.post(
+            self.url("/api/files/delete"),
+            json={"parts": ["part-one"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        row = response.json()["results"][0]
+        self.assertTrue(row["ok"], row)
+        self.assertEqual(self.moon_a.store, {})
+        self.assertEqual(self.history.printer_mode(self.key_a), "prefix")
+
+    def test_delete_reports_failure_when_absent_everywhere(self):
+        self.history.set_catalog("part-one", number=7, file_path=str(self.ref_a))
+        self.moon_a.store = {}
+        response = requests.post(
+            self.url("/api/files/delete"),
+            json={"parts": ["part-one"], "printers": [self.key_a]},
+            timeout=5,
+        )
+        self.assertEqual(response.status_code, 200)
+        row = response.json()["results"][0]
+        self.assertFalse(row["ok"])
+        self.assertIn("не найден", row["error"].lower())
+
+    def test_catalog_sync_reports_checked_at(self):
+        self.seed_catalog()
+        self.moon_a.store = {"FARM/N1.gcode": self.ref_a.read_bytes()}
+        requests.post(
+            self.url("/api/files/sync"), json={"printers": [self.key_a]}, timeout=5
+        )
+        response = requests.get(self.url("/api/catalog?sync=1"), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        checked = response.json().get("checked_at", {})
+        self.assertGreater(float(checked.get(self.key_a, 0.0)), 0.0)
+
     def test_sync_partial_failure(self):
         self.moon_b.stop()
         response = requests.post(self.url("/api/files/sync"), json={}, timeout=10)

@@ -189,6 +189,33 @@ class FilesTests(unittest.TestCase):
         server = self.start_server(folder_broken=True)
         self.assertEqual(ff.list_farm(server.printer(), "folder"), [])
 
+    def test_moonraker_folder_missing_lists_prefix(self):
+        import farm_files as ff
+        from tests.fake_moonraker import FakeMoonraker
+
+        server = FakeMoonraker(folder_broken=True).start()
+        self.addCleanup(server.stop)
+        printer = Printer(name="Тест", host="127.0.0.1", port=server.port)
+        self.assertEqual(ff.list_farm(printer, "folder"), [])
+        server.store["FARM_N7.gcode"] = b"data"
+        self.assertEqual(ff.list_farm(printer, "folder"), [])
+        self.assertEqual(
+            [item["name"] for item in ff.list_farm(printer, "prefix")], ["N7.gcode"]
+        )
+
+    def test_moonraker_delete_is_namespace_scoped(self):
+        import farm_files as ff
+        from tests.fake_moonraker import FakeMoonraker
+
+        server = FakeMoonraker().start()
+        self.addCleanup(server.stop)
+        printer = Printer(name="Тест", host="127.0.0.1", port=server.port)
+        server.store["FARM_N7.gcode"] = b"data"
+        self.assertEqual(ff.delete_from_farm(printer, ["N7.gcode"], "folder"), [])
+        self.assertIn("FARM_N7.gcode", server.store)
+        self.assertEqual(ff.delete_from_farm(printer, ["N7.gcode"], "prefix"), ["N7.gcode"])
+        self.assertEqual(server.store, {})
+
     def test_invalid_names_rejected(self):
         import farm_files as ff
         server = self.start_server()
