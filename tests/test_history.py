@@ -449,6 +449,100 @@ class HistoryStoreTests(unittest.TestCase):
         expected = {first: 2, second: 3}.get(moment.date().isoformat(), 0)
         self.assertEqual(day["parts_target"], expected)
 
+    def test_calendar_days_and_weeks(self):
+        self.history.import_plan(
+            [
+                {"date": "2024-03-04", "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 10},
+                {"date": "2024-03-18", "key": "ГР3.01.42000.01", "code": "МВСЛ.ГР3.01.42000.01", "name": "Крышка", "target": 6},
+                {"date": "2024-03-18", "key": "ГР3.02.10000.01", "code": "МВСЛ.ГР3.02.10000.01", "name": "Корпус", "target": 4},
+            ]
+        )
+        printing = make_view(
+            "printing", "Крышка.gcode", [{"name": "МВСЛ.ГР3.01.42000.01_Крышка.stl", "count": 4}]
+        )
+        self.record(printing, None, datetime(2024, 3, 4, 10, 0).timestamp())
+        self.record(
+            make_view("idle", "Крышка.gcode"),
+            printing,
+            datetime(2024, 3, 4, 10, 1).timestamp(),
+        )
+        extra = make_view(
+            "printing", "Другое.gcode", [{"name": "МВСЛ.ГР9.99.99999.99 Другое.stl", "count": 3}]
+        )
+        self.record(extra, None, datetime(2024, 3, 5, 9, 0).timestamp())
+        self.record(
+            make_view("idle", "Другое.gcode"),
+            extra,
+            datetime(2024, 3, 5, 9, 1).timestamp(),
+        )
+        data = self.history.calendar("2024-03", now=datetime(2024, 3, 18, 12, 0).timestamp())
+        self.assertEqual(data["month"], "2024-03")
+        self.assertEqual(data["month_start"], "2024-03-01")
+        self.assertEqual(data["month_end"], "2024-03-31")
+        self.assertEqual(data["today"], "2024-03-18")
+        self.assertEqual(len(data["days"]), 31)
+        days = {day["date"]: day for day in data["days"]}
+        self.assertEqual(days["2024-03-01"]["weekday"], 5)
+        self.assertEqual(days["2024-03-04"]["target"], 10)
+        self.assertEqual(days["2024-03-04"]["actual"], 4)
+        self.assertEqual(
+            days["2024-03-04"]["items"],
+            [
+                {
+                    "key": "ГР3.01.42000.01",
+                    "code": "МВСЛ.ГР3.01.42000.01",
+                    "name": "Крышка",
+                    "target": 10,
+                    "actual": 4,
+                    "percent": 40.0,
+                }
+            ],
+        )
+        self.assertEqual(days["2024-03-05"]["target"], 0)
+        self.assertEqual(days["2024-03-05"]["actual"], 3)
+        self.assertEqual(days["2024-03-05"]["items"][0]["key"], "ГР9.99.99999.99")
+        self.assertEqual(days["2024-03-05"]["items"][0]["target"], 0)
+        self.assertEqual(days["2024-03-05"]["items"][0]["percent"], 0.0)
+        self.assertEqual(days["2024-03-06"]["target"], 0)
+        self.assertEqual(days["2024-03-06"]["actual"], 0)
+        self.assertEqual(days["2024-03-06"]["items"], [])
+        self.assertEqual(days["2024-03-18"]["target"], 10)
+        self.assertEqual(
+            [item["key"] for item in days["2024-03-18"]["items"]],
+            ["ГР3.01.42000.01", "ГР3.02.10000.01"],
+        )
+        weeks = data["weeks"]
+        self.assertEqual(len(weeks), 5)
+        self.assertEqual((weeks[0]["year"], weeks[0]["week"]), (2024, 9))
+        self.assertEqual((weeks[0]["start"], weeks[0]["end"]), ("2024-02-26", "2024-03-03"))
+        self.assertEqual(weeks[0]["target"], 0)
+        self.assertEqual(weeks[0]["actual"], 0)
+        self.assertEqual(len(weeks[0]["days"]), 7)
+        self.assertEqual(weeks[0]["days"][0], {"date": "2024-02-26", "target": 0, "actual": 0})
+        self.assertEqual((weeks[1]["year"], weeks[1]["week"]), (2024, 10))
+        self.assertEqual((weeks[1]["start"], weeks[1]["end"]), ("2024-03-04", "2024-03-10"))
+        self.assertEqual(weeks[1]["target"], 10)
+        self.assertEqual(weeks[1]["actual"], 7)
+        self.assertEqual(
+            [item["key"] for item in weeks[1]["items"]],
+            ["ГР3.01.42000.01", "ГР9.99.99999.99"],
+        )
+        self.assertEqual(weeks[1]["items"][1]["target"], 0)
+        self.assertEqual((weeks[4]["year"], weeks[4]["week"]), (2024, 13))
+        self.assertEqual((weeks[4]["start"], weeks[4]["end"]), ("2024-03-25", "2024-03-31"))
+        self.assertEqual(len(weeks[4]["days"]), 7)
+
+    def test_calendar_default_month_and_validation(self):
+        moment = datetime(2024, 3, 18, 12, 0).timestamp()
+        data = self.history.calendar(now=moment)
+        self.assertEqual(data["month"], "2024-03")
+        self.assertEqual(data["today"], "2024-03-18")
+        self.assertEqual(self.history.calendar("2024-02", now=moment)["month_end"], "2024-02-29")
+        self.assertEqual(self.history.calendar()["month"], "2023-11")
+        for value in ("2024-13", "2024-00", "2024-3", "24-03", "март", "2024/03"):
+            with self.assertRaises(ValueError, msg=value):
+                self.history.calendar(value, now=moment)
+
     def test_plan_keeps_goal_for_periods_without_items(self):
         self.history.set_goal("day", 70, 2.0)
         self.history.import_plan(

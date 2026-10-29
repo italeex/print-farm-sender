@@ -128,6 +128,46 @@ def _period_dates(start: float, end: float) -> tuple[str, str, str]:
     return first.isoformat(), last.isoformat(), (first - timedelta(days=first.weekday())).isoformat()
 
 
+def _month_first(month) -> date:
+    text = str(month or "").strip()
+    parts = text.split("-")
+    if (
+        len(parts) != 2
+        or len(parts[0]) != 4
+        or len(parts[1]) != 2
+        or not parts[0].isdigit()
+        or not parts[1].isdigit()
+    ):
+        raise ValueError("Месяц должен быть в формате ГГГГ-ММ")
+    try:
+        return date(int(parts[0]), int(parts[1]), 1)
+    except ValueError:
+        raise ValueError("Месяц должен быть в формате ГГГГ-ММ") from None
+
+
+def _next_month(first: date) -> date:
+    return date(first.year + first.month // 12, first.month % 12 + 1, 1)
+
+
+def _calendar_items(entries: dict[str, dict]) -> list[dict]:
+    items = []
+    for key in sorted(entries):
+        entry = entries[key]
+        target = int(entry["target"])
+        actual = int(entry["actual"])
+        items.append(
+            {
+                "key": key,
+                "code": str(entry["code"]),
+                "name": str(entry["name"]),
+                "target": target,
+                "actual": actual,
+                "percent": round(actual / target * 100.0, 1) if target > 0 else 0.0,
+            }
+        )
+    return items
+
+
 def _period_bounds(period: str, now: float) -> tuple[float, float]:
     moment = datetime.fromtimestamp(now)
     if period == "week":
@@ -353,6 +393,93 @@ class HistoryStore:
                 }
             return result
 
+    def calendar(self, month=None, now=None) -> dict:
+        moment = float(self._clock() if now is None else now)
+        today = _day_of(moment)
+        first = _month_first(str(month or "").strip() or today[:7])
+        following = _next_month(first)
+        last = following - timedelta(days=1)
+        span_first = first - timedelta(days=first.weekday())
+        span_last = last + timedelta(days=6 - last.weekday())
+        span_start = span_first.isoformat()
+        span_end = span_last.isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT date, part_key, code, name, target FROM plan_items "
+                "WHERE date >= ? AND date <= ? ORDER BY date, part_key",
+                (span_start, span_end),
+            ).fetchall()
+            actuals = self._day_actuals(span_start, span_end)
+        per_day: dict[str, dict[str, dict]] = {}
+        for row in rows:
+            day = str(row["date"])
+            key = str(row["part_key"])
+            entry = per_day.setdefault(day, {}).setdefault(
+                key, {"code": "", "name": "", "target": 0, "actual": 0}
+            )
+            if not entry["code"]:
+                entry["code"] = str(row["code"] or "")
+            if not entry["name"]:
+                entry["name"] = str(row["name"] or "")
+            entry["target"] += int(row["target"] or 0)
+        for (day, key), count in actuals.items():
+            entry = per_day.setdefault(day, {}).setdefault(
+                key, {"code": "", "name": "", "target": 0, "actual": 0}
+            )
+            entry["actual"] += count
+        day_rows = {}
+        for offset in range((span_last - span_first).days + 1):
+            day = span_first + timedelta(days=offset)
+            items = _calendar_items(per_day.get(day.isoformat(), {}))
+            day_rows[day.isoformat()] = {
+                "date": day.isoformat(),
+                "weekday": day.weekday() + 1,
+                "target": sum(item["target"] for item in items),
+                "actual": sum(item["actual"] for item in items),
+                "items": items,
+            }
+        days = [day_rows[(first + timedelta(days=offset)).isoformat()] for offset in range((last - first).days + 1)]
+        weeks = []
+        cursor = span_first
+        while cursor <= last:
+            merged: dict[str, dict] = {}
+            week_days = []
+            for offset in range(7):
+                row = day_rows[(cursor + timedelta(days=offset)).isoformat()]
+                week_days.append({"date": row["date"], "target": row["target"], "actual": row["actual"]})
+                for item in row["items"]:
+                    entry = merged.setdefault(
+                        item["key"], {"code": item["code"], "name": item["name"], "target": 0, "actual": 0}
+                    )
+                    if not entry["code"]:
+                        entry["code"] = item["code"]
+                    if not entry["name"]:
+                        entry["name"] = item["name"]
+                    entry["target"] += item["target"]
+                    entry["actual"] += item["actual"]
+            iso = cursor.isocalendar()
+            weeks.append(
+                {
+                    "year": iso[0],
+                    "week": iso[1],
+                    "start": cursor.isoformat(),
+                    "end": (cursor + timedelta(days=6)).isoformat(),
+                    "target": sum(day["target"] for day in week_days),
+                    "actual": sum(day["actual"] for day in week_days),
+                    "items": _calendar_items(merged),
+                    "days": week_days,
+                }
+            )
+            cursor += timedelta(days=7)
+        return {
+            "month": first.isoformat()[:7],
+            "month_start": first.isoformat(),
+            "month_end": last.isoformat(),
+            "today": today,
+            "days": days,
+            "weeks": weeks,
+        }
+
     def import_plan(self, items, start=None, end=None) -> dict:
         rows = []
         for item in items or []:
@@ -483,17 +610,20 @@ class HistoryStore:
         return items
 
     def _actuals(self, start, end) -> dict[tuple[str, str], int]:
+        return self._day_actuals(_day_of(start), _day_of(end - 1.0))
+
+    def _day_actuals(self, first: str, last: str) -> dict[tuple[str, str], int]:
         totals: dict[tuple[str, str], int] = {}
         rows = self._conn.execute(
-            "SELECT ts, parts_json FROM events WHERE event = 'complete' "
-            "AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
-            (start, end),
+            "SELECT ts, parts_json FROM events WHERE event = 'complete' AND parts_json IS NOT NULL"
         )
         for row in rows:
             try:
                 day = _day_of(float(row["ts"]))
                 parts = json.loads(row["parts_json"] or "[]")
             except (OverflowError, ValueError):
+                continue
+            if day < first or day > last:
                 continue
             if not isinstance(parts, list):
                 continue

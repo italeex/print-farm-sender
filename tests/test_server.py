@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from calendar import monthrange
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1097,6 +1098,49 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["week"]["hours_target"], 7.5)
         fetched = requests.get(self.url("/api/plan"), timeout=3).json()
         self.assertEqual(fetched["week"]["parts_target"], 100)
+
+    def test_plan_calendar(self):
+        now = time.time()
+        today = datetime.fromtimestamp(now).date()
+        self.record_cycle(now)
+        self.history.import_plan(
+            [
+                {
+                    "date": today.isoformat(),
+                    "key": "КОРПУС",
+                    "code": "МВСЛ.КОРПУС",
+                    "name": "Корпус",
+                    "target": 70,
+                }
+            ]
+        )
+        response = requests.get(self.url("/api/plan/calendar"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["month"], today.isoformat()[:7])
+        self.assertEqual(payload["month_start"], today.replace(day=1).isoformat())
+        self.assertEqual(payload["month_end"], today.replace(day=monthrange(today.year, today.month)[1]).isoformat())
+        self.assertEqual(payload["today"], today.isoformat())
+        self.assertEqual(len(payload["days"]), monthrange(today.year, today.month)[1])
+        day = next(item for item in payload["days"] if item["date"] == today.isoformat())
+        self.assertEqual(day["target"], 70)
+        self.assertEqual(day["actual"], 35)
+        self.assertEqual(day["items"][0]["key"], "КОРПУС")
+        self.assertEqual(day["items"][0]["actual"], 35)
+        self.assertEqual(day["items"][0]["percent"], 50.0)
+        self.assertGreaterEqual(len(payload["weeks"]), 4)
+        for week in payload["weeks"]:
+            self.assertEqual(len(week["days"]), 7)
+            self.assertRegex(week["start"], r"^\d{4}-\d{2}-\d{2}$")
+            self.assertEqual(week["days"][0]["date"], week["start"])
+
+    def test_plan_calendar_rejects_bad_month(self):
+        for month in ("2024-13", "2024-00", "2024-3", "24-03", "март"):
+            response = requests.get(
+                self.url("/api/plan/calendar?month=" + quote(month, safe="")), timeout=3
+            )
+            self.assertEqual(response.status_code, 400, month)
+            self.assertIn("формате", response.json()["error"])
 
     def test_fs_browse_plan_kind(self):
         plan = Path(self.tmp.name) / "plan.xlsx"

@@ -367,6 +367,9 @@ class FarmHandler(BaseHTTPRequestHandler):
         if path == "/api/plan":
             self._send_json(self.app.history.plan())
             return
+        if path == "/api/plan/calendar":
+            self._api_plan_calendar(query)
+            return
         if path.startswith("/api/history/"):
             self._api_history(path[len("/api/history/"):], query)
             return
@@ -538,6 +541,15 @@ class FarmHandler(BaseHTTPRequestHandler):
                 return
         self.app.history.set_goal(period, parts_target, hours_target)
         self._send_json(self.app.history.plan())
+
+    def _api_plan_calendar(self, query) -> None:
+        month = self._query_text(query, "month").strip()
+        try:
+            payload = self.app.history.calendar(month or None)
+        except ValueError as exc:
+            self._send_error(400, str(exc) or "Некорректный месяц")
+            return
+        self._send_json(payload)
 
     def _api_fs(self, query) -> None:
         raw = self._query_text(query, "path")

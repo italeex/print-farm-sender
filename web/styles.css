@@ -543,7 +543,7 @@ body.compact .grid { gap: 10px; }
   background: rgba(56, 214, 245, .14); border: 1px solid rgba(56, 214, 245, .3); color: #7ee7fb;
 }
 .modal-card.history { width: min(1080px, 100%); }
-.modal-card.plan { width: min(940px, 100%); }
+.modal-card.plan { width: min(1120px, 100%); }
 .history-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .history-last { margin: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .history-ranges { width: fit-content; margin-bottom: 14px; }
@@ -586,37 +586,75 @@ body.compact .grid { gap: 10px; }
 .history-event-parts { flex: none; font-family: var(--mono); color: #a9b6cc; }
 .history-event-message { flex: 1 1 100%; color: var(--muted-2); overflow-wrap: anywhere; }
 .history-event.empty { justify-content: center; color: var(--muted-2); }
-.plan-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.plan-card {
-  display: flex; flex-direction: column; gap: 8px; padding: 14px;
-  background: #0d1016; border: 1px solid var(--border-soft); border-radius: 12px;
+.plan-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.plan-month { margin: 0; min-width: 168px; font-size: 16px; font-weight: 620; }
+.plan-nav { font-size: 18px; }
+.plan-calendar {
+  border: 1px solid var(--border-soft); border-radius: 12px; background: #0d1016;
+  overflow: auto;
 }
-.plan-head { display: flex; align-items: center; gap: 8px; }
-.plan-head h3 { margin: 0; flex: 1; font-size: 14px; font-weight: 620; }
-.plan-head .badge {
+.plan-weekdays, .plan-week-row {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)) 132px; gap: 4px;
+}
+.plan-weekdays {
+  position: sticky; top: 0; z-index: 2; padding: 8px;
+  background: #131822; border-bottom: 1px solid var(--border-soft);
+  font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;
+  color: var(--muted); text-align: center;
+}
+.plan-weekdays .plan-week-col { border-left: 1px solid var(--border-soft); }
+.plan-weeks { display: flex; flex-direction: column; gap: 4px; padding: 8px; }
+.plan-day, .plan-week {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  min-height: 54px; padding: 6px 7px; overflow: hidden;
+  border: 1px solid transparent; border-radius: 8px;
+  background: #11151e; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.plan-day:hover, .plan-week:hover { background: #171d28; border-color: #2a3446; }
+.plan-day.other-month { opacity: .45; }
+.plan-day.today { border-color: #3c5a91; }
+.plan-day-num { font-family: var(--mono); font-size: 12.5px; font-weight: 600; line-height: 1.2; }
+.plan-day-count {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  white-space: nowrap;
+}
+.plan-day.has-plan { background: #121a28; }
+.plan-day.partial { background: rgba(245, 165, 36, .1); }
+.plan-day.partial .plan-day-count { color: #ffc766; }
+.plan-day.done { background: rgba(52, 211, 153, .1); }
+.plan-day.done .plan-day-count { color: #6ee7b7; }
+.plan-week {
+  align-items: center; justify-content: center; text-align: center;
+  background: #0f131b; border-color: var(--border-soft);
+}
+.plan-week-num {
+  font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-2);
+}
+.plan-week-count { font-family: var(--mono); font-size: 11.5px; color: #cfd8e8; white-space: nowrap; }
+.plan-week.partial { border-color: rgba(245, 165, 36, .35); }
+.plan-week.partial .plan-week-count { color: #ffc766; }
+.plan-week.done { border-color: rgba(52, 211, 153, .35); }
+.plan-week.done .plan-week-count { color: #6ee7b7; }
+.plan-day.selected, .plan-week.selected {
+  border-color: var(--accent); background: #1a2436;
+  box-shadow: inset 0 0 0 1px rgba(91, 140, 255, .35);
+}
+.plan-selection {
+  margin-top: 14px; padding: 12px; background: #0d1016;
+  border: 1px solid var(--border-soft); border-radius: 12px;
+}
+.plan-selection-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.plan-selection-titles { flex: 1; min-width: 0; }
+.plan-selection-head h3 { margin: 0; font-size: 14px; font-weight: 620; }
+.plan-selection-head .badge {
   font-size: 11px; padding: 3px 8px; border-radius: 999px; font-family: var(--mono);
   background: #1a2130; border: 1px solid var(--border); color: #a9b6cc;
 }
-.plan-progress { height: 6px; border-radius: 999px; overflow: hidden; background: #1a202c; }
-.plan-progress i {
-  display: block; height: 100%; transition: width .2s ease;
-  background: linear-gradient(90deg, #6b98ff, #7c5cff);
-}
-.plan-line { margin: 0; font-size: 12px; font-family: var(--mono); color: var(--muted); }
-.plan-card .field-row { margin-top: 4px; }
-.plan-card .field label { font-size: 11px; }
-.plan-card .field input { padding: 7px 9px; font-size: 12.5px; }
-.plan-dates { margin: -2px 0 0; font-size: 11.5px; font-family: var(--mono); color: var(--muted-2); }
-.plan-tabs { width: fit-content; margin-bottom: 14px; }
-.plan-parts { margin-top: 16px; }
-.plan-parts-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.plan-parts-head h3 { margin: 0; font-size: 14px; font-weight: 620; }
-.plan-parts-head .badge {
-  font-size: 11px; padding: 3px 8px; border-radius: 999px; font-family: var(--mono);
-  background: #1a2130; border: 1px solid var(--border); color: #a9b6cc;
+.plan-selection-summary {
+  margin: 3px 0 0; font-size: 12px; font-family: var(--mono); color: var(--muted);
 }
 .plan-table-wrap {
-  max-height: 320px; overflow: auto; border: 1px solid var(--border-soft);
+  max-height: 300px; overflow: auto; border: 1px solid var(--border-soft);
   border-radius: 11px; background: #0d1016;
 }
 .plan-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -644,6 +682,19 @@ body.compact .grid { gap: 10px; }
   background: linear-gradient(90deg, #6b98ff, #7c5cff);
 }
 .plan-empty { margin: 0; padding: 18px 12px; text-align: center; font-size: 12.5px; color: var(--muted-2); }
+
+@media (max-width: 760px) {
+  .plan-weekdays, .plan-week-row { grid-template-columns: repeat(7, minmax(0, 1fr)) 74px; gap: 3px; }
+  .plan-weekdays { padding: 6px 4px; font-size: 10px; }
+  .plan-weeks { padding: 4px; }
+  .plan-day, .plan-week { min-height: 46px; padding: 4px; border-radius: 6px; }
+  .plan-day-num { font-size: 11px; }
+  .plan-day-count { font-size: 9px; }
+  .plan-week-num { font-size: 9px; }
+  .plan-week-count { font-size: 9.5px; }
+  .plan-month { min-width: 0; font-size: 15px; }
+  .plan-toolbar .btn { flex: 1 1 auto; justify-content: center; }
+}
 
 /* printing now */
 .modal-card.printing { width: min(1040px, 100%); }
