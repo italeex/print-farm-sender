@@ -722,6 +722,29 @@ body.compact .grid { gap: 10px; }
 .plan-progress-label { margin-top: 6px; font-size: 12px; font-family: var(--mono); color: var(--muted); }
 #plan-selection .plan-progress { margin: 0 0 10px; }
 
+/* start-now advice */
+.advice {
+  margin-top: 12px; padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.advice-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.advice-head h2 { margin: 0; font-size: 14px; font-weight: 620; flex: 1; min-width: 140px; }
+.advice-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.advice-actions .btn { padding: 8px 12px; font-size: 12.5px; }
+.advice-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.advice-row {
+  display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap;
+  padding: 8px 10px; font-size: 12.5px; color: var(--muted);
+  background: #0d1016; border: 1px solid var(--border-soft); border-radius: 9px;
+}
+.advice-row b { color: #d7dfec; font-weight: 600; }
+.advice-row span { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.advice-empty { margin: 0; font-size: 12.5px; color: var(--muted); }
+
 @media (max-width: 760px) {
   .plan-weekdays, .plan-week-row { grid-template-columns: repeat(7, minmax(0, 1fr)) 74px; gap: 3px; }
   .plan-weekdays { padding: 6px 4px; font-size: 10px; }

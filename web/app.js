@@ -210,6 +210,9 @@ let planProgressEl = null;
 const planCalendarCache = new Map();
 const PLAN_CACHE_TTL_MS = 15000;
 let modalPrinting = null;
+let adviceEl = null;
+let adviceListEl = null;
+let adviceEmptyEl = null;
 let printingButtonEl = null;
 let printingCountEl = null;
 let printingSummaryEl = null;
@@ -574,6 +577,7 @@ function render() {
   renderPrinting();
   renderCards();
   renderJob();
+  renderAdvice();
   applyFilters();
   updateSelectionUI();
 }
@@ -3233,6 +3237,7 @@ function renderPlan() {
   }
   renderPlanProgress(overviewProgressEl, planData ? planData.day : null);
   renderPlanProgress(planProgressEl, planSelectedPeriod());
+  renderAdvice();
 }
 
 async function loadPlan() {
@@ -3467,6 +3472,109 @@ function openPrintingModal() {
   if (!modalPrinting) return;
   openModal(modalPrinting);
   renderPrintingModal(activePrinting());
+}
+
+function adviceRemaining(item) {
+  const target = Number(item ? item.target : 0) || 0;
+  const actual = Number(item ? item.actual : 0) || 0;
+  const inProgress = planInProgress(item ? item.in_progress : 0);
+  return Math.max(0, target - actual - inProgress);
+}
+
+function adviceEtaText(item) {
+  if (!item || typeof item !== "object") return "";
+  const raw = item.eta_text !== undefined && item.eta_text !== null && item.eta_text !== ""
+    ? item.eta_text
+    : item.eta !== undefined && item.eta !== null && item.eta !== ""
+      ? item.eta
+      : null;
+  if (raw === null) return "";
+  if (typeof raw === "number" && Number.isFinite(raw)) return formatDuration(raw);
+  const numeric = Number(raw);
+  if (String(raw).trim() !== "" && Number.isFinite(numeric) && /^\s*\d+(\.\d+)?\s*$/.test(String(raw))) {
+    return formatDuration(numeric);
+  }
+  return String(raw);
+}
+
+function advicePartTitle(part) {
+  const code = String(part.code || "").trim();
+  const name = String(part.name || part.key || "").trim();
+  if (code && name && code !== name) return code + " · " + name;
+  return code || name || "—";
+}
+
+function buildAdvice() {
+  const free = state.printers.filter(function (view) {
+    return view && view.state === "idle";
+  });
+  const items = planData && planData.day && Array.isArray(planData.day.items)
+    ? planData.day.items.filter(Boolean)
+    : [];
+  const pending = items
+    .map(function (item) {
+      return { part: item, remaining: adviceRemaining(item) };
+    })
+    .filter(function (entry) {
+      return entry.remaining > 0;
+    })
+    .sort(function (left, right) {
+      return right.remaining - left.remaining;
+    });
+  const count = Math.min(3, free.length, pending.length);
+  const result = [];
+  for (let index = 0; index < count; index += 1) {
+    result.push({
+      printer: free[index],
+      part: pending[index].part,
+      remaining: pending[index].remaining,
+      eta: adviceEtaText(pending[index].part) || null,
+    });
+  }
+  return result;
+}
+
+function renderAdvice() {
+  if (!adviceEl || !adviceListEl || !adviceEmptyEl) return;
+  const free = state.printers.filter(function (view) {
+    return view && view.state === "idle";
+  });
+  const items = planData && planData.day && Array.isArray(planData.day.items)
+    ? planData.day.items.filter(Boolean)
+    : [];
+  const hasRemaining = items.some(function (item) {
+    return adviceRemaining(item) > 0;
+  });
+  adviceListEl.textContent = "";
+  if (!free.length) {
+    adviceListEl.hidden = true;
+    adviceEmptyEl.hidden = false;
+    setText(adviceEmptyEl, "Все принтеры заняты");
+    return;
+  }
+  if (!hasRemaining) {
+    adviceListEl.hidden = true;
+    adviceEmptyEl.hidden = false;
+    setText(adviceEmptyEl, "План на сегодня выполнен");
+    return;
+  }
+  adviceListEl.hidden = false;
+  adviceEmptyEl.hidden = true;
+  const advice = buildAdvice();
+  for (const entry of advice) {
+    const row = document.createElement("li");
+    row.className = "advice-row";
+    const title = document.createElement("b");
+    title.textContent = advicePartTitle(entry.part);
+    row.appendChild(title);
+    const rest = document.createElement("span");
+    const printerName = entry.printer.name || entry.printer.key || "";
+    let text = " · остаток " + formatPlanNumber(entry.remaining) + " · " + printerName;
+    if (entry.eta) text += " · " + entry.eta;
+    rest.textContent = text;
+    row.appendChild(rest);
+    adviceListEl.appendChild(row);
+  }
 }
 
 function planFilePaths(data) {
@@ -3771,6 +3879,9 @@ function init() {
   printingPrintersSection = document.getElementById("printing-printers-section");
   printingPrintersBodyEl = document.getElementById("printing-printers-body");
   printingEmptyEl = document.getElementById("printing-empty");
+  adviceEl = document.getElementById("advice");
+  adviceListEl = document.getElementById("advice-list");
+  adviceEmptyEl = document.getElementById("advice-empty");
 
   if (searchEl) {
     searchEl.addEventListener("input", function () {
@@ -3938,6 +4049,12 @@ function init() {
     showTab("plan");
   });
   if (printingButtonEl) printingButtonEl.addEventListener("click", openPrintingModal);
+  const advicePlanButton = document.getElementById("advice-plan");
+  if (advicePlanButton) advicePlanButton.addEventListener("click", function () {
+    showTab("plan");
+  });
+  const advicePrintingButton = document.getElementById("advice-printing");
+  if (advicePrintingButton) advicePrintingButton.addEventListener("click", openPrintingModal);
   if (planImportEl) planImportEl.addEventListener("click", importPlan);
   if (planPrevEl) planPrevEl.addEventListener("click", function () {
     planGoMonth(-1);
