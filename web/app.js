@@ -203,6 +203,7 @@ let planSelectionSummaryEl = null;
 let planCalendar = null;
 let planCalendarMonth = "";
 let planCalendarRequest = 0;
+let planLoadedAt = 0;
 let planSelection = null;
 const planCalendarCache = new Map();
 const PLAN_CACHE_TTL_MS = 15000;
@@ -3174,6 +3175,7 @@ async function loadPlanMonth(key, force) {
     planCalendarCache.set(key, { data: data, at: Date.now() });
     if (planCalendarMonth !== key) return;
     planCalendar = data;
+    planLoadedAt = Date.now();
     renderPlanCalendar();
   } catch (error) {
     if (token !== planCalendarRequest) return;
@@ -3242,8 +3244,10 @@ function openPlanTab() {
   }
   planCalendar = planCacheGet(planCalendarMonth) || planCalendar;
   renderPlanCalendar();
-  loadPlan();
-  loadPlanMonth(planCalendarMonth);
+  if (!planCalendar || Date.now() - planLoadedAt > PLAN_POLL_MS) {
+    loadPlan();
+    loadPlanMonth(planCalendarMonth);
+  }
 }
 
 function closePlanTab() {

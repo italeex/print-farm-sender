@@ -568,7 +568,6 @@ body.compact .grid { gap: 10px; }
   background: rgba(56, 214, 245, .14); border: 1px solid rgba(56, 214, 245, .3); color: #7ee7fb;
 }
 .modal-card.history { width: min(1080px, 100%); }
-.modal-card.plan { width: min(1120px, 100%); }
 .history-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .history-last { margin: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .history-ranges { width: fit-content; margin-bottom: 14px; }
