@@ -1315,6 +1315,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Неверная дата", response.json()["error"])
 
+    def test_api_qc_accepts_padded_date(self):
+        self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        response = requests.get(self.url("/api/qc?date=%202026-10-29%20"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["date"], "2026-10-29")
+        self.assertEqual(response.json()["total"], 4)
+
     def test_api_qc_csv(self):
         self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
         response = requests.get(self.url("/api/qc.csv?date=2026-10-29"), timeout=3)
