@@ -81,7 +81,8 @@ def build_schedule(now, date, items, printers, ready, estimates):
     scheduled = len(tasks)
     return {
         "date": date if isinstance(date, str) else day.isoformat(),
-        "window": {"start": start_ts, "end": end_ts},
+        "window": {"start": SHIFT_START, "end": SHIFT_END},
+        "closed": closed,
         "tasks": tasks,
         "unscheduled": unscheduled,
         "totals": {"positions": len(items), "copies": copies,

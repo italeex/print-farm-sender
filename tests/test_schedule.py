@@ -132,6 +132,8 @@ class BuildScheduleTests(unittest.TestCase):
         self.assertEqual(out["tasks"], [])
         self.assertEqual(out["unscheduled"][0]["reason"], "смена закрыта")
         self.assertEqual(out["unscheduled"][0]["remaining"], 2)
+        self.assertTrue(out["closed"])
+        self.assertEqual(out["window"], {"start": "09:00", "end": "18:00"})
 
     def test_empty_printers(self):
         out = build_schedule(NOW, DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 2}],
@@ -169,7 +171,9 @@ class BuildScheduleTests(unittest.TestCase):
                              [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
                              {"p1": {"a", "b"}}, {"a": 3600, "b": 3600})
         self.assertEqual(out["date"], DATE)
-        self.assertEqual(out["window"], {"start": at("09:00"), "end": at("18:00")})
+        self.assertEqual(out["window"], {"start": "09:00", "end": "18:00"})
+        self.assertEqual(out["window"], {"start": SHIFT_START, "end": SHIFT_END})
+        self.assertFalse(out["closed"])
         self.assertEqual(out["totals"]["positions"], 2)
         self.assertEqual(out["totals"]["copies"], 3)
         self.assertEqual(out["totals"]["scheduled"], 3)
