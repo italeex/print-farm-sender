@@ -1063,6 +1063,12 @@ class ScheduleStorageTests(unittest.TestCase):
         self.assertEqual(self.history.part_durations(), {})
 
     def test_save_schedule_replaces_day(self):
+        self.history.import_plan(
+            [
+                {"date": "2026-10-29", "key": "A", "code": "A", "name": "A", "target": 2},
+                {"date": "2026-10-29", "key": "B", "code": "B", "name": "B", "target": 1},
+            ]
+        )
         tasks = [
             {"printer_key": "p1", "part_key": "A", "number": 1, "start": 100.0, "finish": 200.0},
             {"printer_key": "p1", "part_key": "B", "number": 2, "start": 200.0, "finish": 300.0, "manual": 1},
@@ -1073,6 +1079,11 @@ class ScheduleStorageTests(unittest.TestCase):
         self.assertEqual([row["part_key"] for row in rows], ["A", "B"])
         self.assertEqual(rows[0]["file_name"], "N1.gcode")
         self.assertEqual(rows[0]["planned_start"], 100.0)
+        self.assertEqual(rows[0]["planned_finish"], 200.0)
+        self.assertEqual(rows[0]["start"], 100.0)
+        self.assertEqual(rows[0]["finish"], 200.0)
+        self.assertEqual(rows[1]["planned_finish"], 300.0)
+        self.assertEqual(rows[1]["finish"], 300.0)
         self.assertEqual(rows[0]["state"], "planned")
         self.assertEqual(rows[0]["manual"], 0)
         self.assertEqual(rows[1]["manual"], 1)
@@ -1082,6 +1093,9 @@ class ScheduleStorageTests(unittest.TestCase):
         self.assertEqual(self.history.schedule("2026-10-30"), [])
 
     def test_save_schedule_rejects_bad_input(self):
+        self.history.import_plan(
+            [{"date": "2026-10-29", "key": "A", "code": "A", "name": "A", "target": 1}]
+        )
         with self.assertRaises(ValueError):
             self.history.save_schedule("март", [])
         with self.assertRaises(ValueError):
@@ -1094,9 +1108,71 @@ class ScheduleStorageTests(unittest.TestCase):
             self.history.save_schedule(
                 "2026-10-29", [{"printer_key": "p1", "part_key": "A", "start": 2.0, "finish": 1.0}]
             )
+        with self.assertRaises(ValueError) as negative:
+            self.history.save_schedule(
+                "2026-10-29", [{"printer_key": "p1", "part_key": "A", "start": -5.0, "finish": 2.0}]
+            )
+        self.assertIn("отрицательн", str(negative.exception).lower())
+        with self.assertRaises(ValueError) as negative_finish:
+            self.history.save_schedule(
+                "2026-10-29", [{"printer_key": "p1", "part_key": "A", "start": 1.0, "finish": -2.0}]
+            )
+        self.assertIn("отрицательн", str(negative_finish.exception).lower())
+        with self.assertRaises(ValueError) as unknown:
+            self.history.save_schedule(
+                "2026-10-29", [{"printer_key": "p1", "part_key": "ZZZ", "start": 1.0, "finish": 2.0}]
+            )
+        self.assertIn("Неизвестная деталь", str(unknown.exception))
+        with self.assertRaises(ValueError):
+            self.history.save_schedule(
+                "2026-10-29", [{"printer_key": "   ", "part_key": "A", "start": 1.0, "finish": 2.0}]
+            )
         with self.assertRaises(ValueError):
             self.history.schedule("март")
         self.assertEqual(self.history.schedule("2026-10-29"), [])
+
+    def test_schedule_migrates_planned_finish(self):
+        legacy = self.path.parent / "legacy_sched.db"
+        connection = sqlite3.connect(str(legacy))
+        connection.executescript(
+            "CREATE TABLE schedule_tasks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, printer_key TEXT NOT NULL, "
+            "part_key TEXT NOT NULL, number INTEGER, file_path TEXT, file_size INTEGER, "
+            "file_mtime REAL, updated_at REAL);"
+        )
+        connection.close()
+        legacy.unlink()
+        connection = sqlite3.connect(str(legacy))
+        connection.executescript(
+            "CREATE TABLE schedule_tasks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, printer_key TEXT NOT NULL, "
+            "part_key TEXT NOT NULL, number INTEGER, file_name TEXT, planned_start REAL, "
+            "state TEXT NOT NULL DEFAULT 'planned', manual INTEGER NOT NULL DEFAULT 0, "
+            "created_at REAL NOT NULL);"
+            "INSERT INTO schedule_tasks (date, printer_key, part_key, number, file_name, "
+            "planned_start, state, manual, created_at) "
+            "VALUES ('2026-10-29', 'p1', 'A', 1, 'N1.gcode', 100.0, 'planned', 0, 1.0);"
+        )
+        connection.commit()
+        connection.close()
+        store = HistoryStore(legacy, clock=self.clock)
+        self.addCleanup(store.close)
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(schedule_tasks)")}
+        self.assertIn("planned_finish", columns)
+        store.import_plan(
+            [{"date": "2026-10-29", "key": "A", "code": "A", "name": "A", "target": 1}]
+        )
+        rows = store.schedule("2026-10-29")
+        self.assertEqual(rows[0]["planned_start"], 100.0)
+        self.assertIsNone(rows[0]["planned_finish"])
+        result = store.save_schedule(
+            "2026-10-29",
+            [{"printer_key": "p1", "part_key": "A", "number": 1, "start": 100.0, "finish": 200.0}],
+        )
+        self.assertEqual(result["saved"], 1)
+        rows = store.schedule("2026-10-29")
+        self.assertEqual(rows[0]["planned_finish"], 200.0)
+        self.assertEqual(rows[0]["finish"], 200.0)
 
 
 if __name__ == "__main__":

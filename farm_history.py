@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS schedule_tasks (
     number INTEGER,
     file_name TEXT,
     planned_start REAL,
+    planned_finish REAL,
     state TEXT NOT NULL DEFAULT 'planned',
     manual INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
@@ -1252,14 +1253,38 @@ class HistoryStore:
         rows = [self._schedule_row(text, task, moment) for task in tasks]
         with self._lock:
             self._ensure_schedule_schema_locked()
+            known = self._known_part_keys_locked()
+            for row, task in zip(rows, tasks):
+                part = str(task.get("part_key") or "").strip()
+                if part not in known:
+                    raise ValueError(f"Неизвестная деталь: {part or 'пусто'}")
             self._conn.execute("DELETE FROM schedule_tasks WHERE date = ?", (text,))
             self._conn.executemany(
                 "INSERT INTO schedule_tasks (date, printer_key, part_key, number, file_name, "
-                "planned_start, state, manual, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "planned_start, planned_finish, state, manual, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self._conn.commit()
         return {"date": text, "saved": len(rows)}
+
+    def _known_part_keys_locked(self) -> set[str]:
+        known: set[str] = set()
+        try:
+            for row in self._conn.execute("SELECT part_key FROM parts_catalog"):
+                key = str(row["part_key"] or "").strip()
+                if key:
+                    known.add(key)
+        except sqlite3.Error:
+            pass
+        try:
+            for row in self._conn.execute("SELECT DISTINCT part_key FROM plan_items"):
+                key = str(row["part_key"] or "").strip()
+                if key:
+                    known.add(key)
+        except sqlite3.Error:
+            pass
+        return known
 
     def schedule(self, day) -> list[dict]:
         text = _iso_day(day)
@@ -1269,10 +1294,17 @@ class HistoryStore:
             self._ensure_schedule_schema_locked()
             rows = self._conn.execute(
                 "SELECT id, date, printer_key, part_key, number, file_name, planned_start, "
-                "state, manual, created_at FROM schedule_tasks WHERE date = ? ORDER BY id",
+                "planned_finish, state, manual, created_at FROM schedule_tasks "
+                "WHERE date = ? ORDER BY id",
                 (text,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["start"] = item.get("planned_start")
+            item["finish"] = item.get("planned_finish")
+            result.append(item)
+        return result
 
     @staticmethod
     def _schedule_row(day: str, task, moment: float) -> tuple:
@@ -1292,6 +1324,8 @@ class HistoryStore:
             finish_value = float(task.get("finish"))
         except (TypeError, ValueError):
             raise ValueError("Некорректное время задачи") from None
+        if start_value < 0 or finish_value < 0:
+            raise ValueError("Время задачи не может быть отрицательным")
         if (
             not math.isfinite(start_value)
             or not math.isfinite(finish_value)
@@ -1307,16 +1341,19 @@ class HistoryStore:
         if state not in ("planned", "printing", "done"):
             state = "planned"
         manual = 1 if task.get("manual") else 0
-        return (day, printer, part, number, file_name, start_value, state, manual, moment)
+        return (day, printer, part, number, file_name, start_value, finish_value, state, manual, moment)
 
     def _ensure_schedule_schema_locked(self) -> None:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS schedule_tasks ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, printer_key TEXT NOT NULL, "
             "part_key TEXT NOT NULL, number INTEGER, file_name TEXT, planned_start REAL, "
-            "state TEXT NOT NULL DEFAULT 'planned', manual INTEGER NOT NULL DEFAULT 0, "
-            "created_at REAL NOT NULL)"
+            "planned_finish REAL, state TEXT NOT NULL DEFAULT 'planned', "
+            "manual INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)"
         )
+        columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(schedule_tasks)")}
+        if "planned_finish" not in columns:
+            self._conn.execute("ALTER TABLE schedule_tasks ADD COLUMN planned_finish REAL")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS schedule_tasks_date ON schedule_tasks (date)"
         )
@@ -1490,9 +1527,12 @@ class HistoryStore:
             "CREATE TABLE IF NOT EXISTS schedule_tasks ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, printer_key TEXT NOT NULL, "
             "part_key TEXT NOT NULL, number INTEGER, file_name TEXT, planned_start REAL, "
-            "state TEXT NOT NULL DEFAULT 'planned', manual INTEGER NOT NULL DEFAULT 0, "
-            "created_at REAL NOT NULL)"
+            "planned_finish REAL, state TEXT NOT NULL DEFAULT 'planned', "
+            "manual INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)"
         )
+        schedule_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(schedule_tasks)")}
+        if "planned_finish" not in schedule_columns:
+            self._conn.execute("ALTER TABLE schedule_tasks ADD COLUMN planned_finish REAL")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS schedule_tasks_date ON schedule_tasks (date)"
         )

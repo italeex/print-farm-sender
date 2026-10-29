@@ -180,5 +180,33 @@ class BuildScheduleTests(unittest.TestCase):
         self.assertEqual(out["totals"]["unscheduled"], 0)
 
 
+    def test_stored_epoch_start_finish_contract(self):
+        out = build_schedule(NOW, DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 1}],
+                             [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
+                             {"p1": {"a"}}, {"a": 3600})
+        task = out["tasks"][0]
+        self.assertEqual(task["start"], at("09:00"))
+        self.assertEqual(task["finish"], at("10:00"))
+        self.assertGreater(task["finish"], task["start"])
+
+    def test_closed_true_keeps_unscheduled_copies(self):
+        out = build_schedule(at("19:00"), DATE, [{"part_key": "a", "number": 1, "name": "A", "remaining": 2}],
+                             [{"key": "p1", "name": "P1", "state": "idle", "finish_at": None}],
+                             {"p1": {"a"}}, {"a": 3600})
+        self.assertTrue(out["closed"])
+        self.assertEqual(out["tasks"], [])
+        self.assertEqual(out["unscheduled"][0]["remaining"], 2)
+        self.assertEqual(out["unscheduled"][0]["reason"], "смена закрыта")
+        self.assertEqual(out["totals"]["unscheduled"], 2)
+
+    def test_estimate_default_is_four_hours(self):
+        value, is_default = estimate_seconds([])
+        self.assertEqual(value, 14400.0)
+        self.assertTrue(is_default)
+        median, is_default = estimate_seconds([60.0, 180.0])
+        self.assertEqual(median, 120.0)
+        self.assertFalse(is_default)
+
+
 if __name__ == "__main__":
     unittest.main()

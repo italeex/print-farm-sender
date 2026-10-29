@@ -964,6 +964,8 @@ class FarmHandler(BaseHTTPRequestHandler):
         plan = self.app.history.plan(now, live_parts=self._live_parts())
         catalog = self.app.history.catalog_map()
         durations = self.app.history.part_durations()
+        from farm_history import _day_of as _schedule_day_of
+        is_today = day == _schedule_day_of(now)
         included: set[str] = set()
         items = []
         scopes = [
@@ -978,11 +980,12 @@ class FarmHandler(BaseHTTPRequestHandler):
                 if not key or key in included:
                     continue
                 try:
+                    busy = int(entry.get("in_progress") or 0) if is_today else 0
                     remaining = max(
                         0,
                         int(entry.get("target") or 0)
                         - int(entry.get("actual") or 0)
-                        - int(entry.get("in_progress") or 0),
+                        - busy,
                     )
                 except (TypeError, ValueError):
                     continue

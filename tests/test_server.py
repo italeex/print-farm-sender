@@ -1958,6 +1958,94 @@ class ScheduleApiTests(unittest.TestCase):
             self.assertIn(hint, response.json()["error"], body)
         self.assertEqual(self.history.schedule(day), [])
 
+    def test_apply_roundtrip_keeps_epoch_start_finish(self):
+        self.add_reference("A")
+        day = (date.today() + timedelta(days=1)).isoformat()
+        tasks = [
+            {"printer_key": self.key, "part_key": "A", "number": 1,
+             "start": 100.0, "finish": 200.0},
+        ]
+        response = requests.post(self.url("/api/schedule/apply"), json={"date": day, "tasks": tasks}, timeout=5)
+        self.assertEqual(response.status_code, 200)
+        rows = self.history.schedule(day)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["planned_start"], 100.0)
+        self.assertEqual(rows[0]["planned_finish"], 200.0)
+        self.assertEqual(rows[0]["start"], 100.0)
+        self.assertEqual(rows[0]["finish"], 200.0)
+
+    def test_get_closed_true_for_past_date(self):
+        today = date.today()
+        self.import_day(today.isoformat(), "A", 2)
+        self.add_reference("A")
+        self.add_duration("A", 60)
+        past = (today - timedelta(days=1)).isoformat()
+        response = requests.get(self.url("/api/schedule?date=" + quote(past)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["closed"])
+        self.assertEqual(payload["tasks"], [])
+        self.assertTrue(payload["unscheduled"])
+        self.assertEqual(payload["unscheduled"][0]["reason"], "смена закрыта")
+
+    def test_get_unscheduled_copies(self):
+        today = date.today()
+        self.import_day(today.isoformat(), "A", 3)
+        self.add_reference("A")
+        self.add_duration("A", 3600)
+        sked = (today + timedelta(days=1)).isoformat()
+        response = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["totals"]["copies"], 3)
+        self.assertEqual(payload["totals"]["scheduled"] + payload["totals"]["unscheduled"], 3)
+        if payload["unscheduled"]:
+            self.assertGreaterEqual(payload["unscheduled"][0]["remaining"], 1)
+
+    def test_get_other_dates_ignore_in_progress(self):
+        from dataclasses import asdict, replace as dc_replace
+        today = date.today()
+        self.import_day(today.isoformat(), "A", 5)
+        self.add_reference("A")
+        self.add_duration("A", 60)
+        printing = dc_replace(
+            self.monitor.view, key="10.0.0.9:7125", name="Второй",
+            state="printing", parts=[{"name": "A", "count": 2}],
+        )
+        idle = dc_replace(self.monitor.view, state="idle", parts=[])
+
+        class Views:
+            def snapshot(self):
+                return {"printers": [asdict(idle), asdict(printing)], "updated_at": 0.0}
+
+        self.app.monitor = Views()
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        other = requests.get(self.url("/api/schedule?date=" + quote(tomorrow)), timeout=5).json()
+        self.assertEqual(other["totals"]["copies"], 5)
+        self.assertEqual(other["totals"]["scheduled"], 5)
+        current = requests.get(self.url("/api/schedule?date=" + quote(today.isoformat())), timeout=5).json()
+        self.assertEqual(current["totals"]["copies"], 3)
+        self.assertEqual(current["totals"]["scheduled"], 3)
+
+    def test_get_estimate_median_vs_default(self):
+        today = date.today()
+        self.history.import_plan(
+            [
+                {"date": today.isoformat(), "key": "A", "code": "A", "name": "A", "target": 1},
+                {"date": today.isoformat(), "key": "B", "code": "B", "name": "B", "target": 1},
+            ]
+        )
+        self.add_reference("A")
+        self.add_reference("B")
+        self.add_duration("A", 60)
+        self.add_duration("A", 180)
+        sked = (today + timedelta(days=1)).isoformat()
+        response = requests.get(self.url("/api/schedule?date=" + quote(sked)), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        by_key = {task["part_key"]: task for task in response.json()["tasks"]}
+        self.assertEqual(by_key["A"]["finish"] - by_key["A"]["start"], 120.0)
+        self.assertEqual(by_key["B"]["finish"] - by_key["B"]["start"], 14400.0)
+
 
 if __name__ == "__main__":
     unittest.main()
