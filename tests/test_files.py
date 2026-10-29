@@ -37,7 +37,7 @@ class FakeFileServer:
 
             def _path(self):
                 raw = urlsplit(self.path)
-                fake.requests.append(raw.path)
+                fake.requests.append((self.command, raw.path, raw.query))
                 return raw.path, raw.query
 
             def do_GET(self):
@@ -156,6 +156,9 @@ class FilesTests(unittest.TestCase):
         deleted = ff.delete_from_farm(printer, ["N7.gcode"], "folder")
         self.assertEqual(deleted, ["N7.gcode"])
         self.assertEqual(server.store, {})
+        self.assertIn(("POST", "/server/files/upload", ""), server.requests)
+        self.assertIn(("GET", "/server/files/directory", "path=gcodes/FARM"), server.requests)
+        self.assertIn(("DELETE", "/server/files/gcodes/FARM/N7.gcode", ""), server.requests)
 
     def test_prefix_cycle(self):
         import farm_files as ff
