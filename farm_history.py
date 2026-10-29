@@ -946,7 +946,7 @@ class HistoryStore:
             moment = self._clock()
             for key in missing:
                 code, name = known[key]
-                while True:
+                for _ in range(5):
                     try:
                         self._conn.execute(
                             "INSERT INTO parts_catalog (part_key, number, code, name, updated_at) "
@@ -961,6 +961,8 @@ class HistoryStore:
                         }
                         if key in taken:
                             break
+                else:
+                    raise ValueError(f"Не удалось выдать номер детали {key}")
         for key, (code, name) in known.items():
             if key not in present:
                 continue

@@ -895,6 +895,37 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(item["code"], "")
         self.assertEqual(item["name"], "")
 
+    def test_catalog_seed_clash_cap_raises_russian(self):
+        printing = make_view("printing", "a.gcode", [{"name": "ДетальА", "count": 1}])
+        self.record(printing, None, BASE)
+        self.record(make_view("idle", "a.gcode"), printing, BASE + 60)
+        real_conn = self.history._conn
+        attempts = []
+
+        class AlwaysClash:
+            def execute(self, sql, *args):
+                if isinstance(sql, str) and sql.startswith("INSERT INTO parts_catalog"):
+                    attempts.append(1)
+                    raise sqlite3.IntegrityError("UNIQUE constraint failed: parts_catalog.number")
+                return real_conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        self.history._conn = AlwaysClash()
+        try:
+            with self.assertRaises(ValueError) as caught:
+                self.history.catalog()
+        finally:
+            self.history._conn = real_conn
+        self.assertEqual(len(attempts), 5)
+        self.assertIn("номер", str(caught.exception).lower())
+        self.assertNotIn("ДЕТАЛЬА", self.history.catalog_map())
+        mark = self.history._conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_events_id'"
+        ).fetchone()
+        self.assertIsNone(mark)
+
     def test_events_event_ts_index(self):
         names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
         self.assertIn("events_event_ts", names)
