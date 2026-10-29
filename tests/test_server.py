@@ -1279,5 +1279,56 @@ class ApiTests(unittest.TestCase):
         self.assertIn("kind", bad.json()["error"])
 
 
+    def complete_at(self, stamp, items):
+        moment = datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp()
+        printing = replace(
+            self.monitor.view,
+            state="printing",
+            file="деталь.gcode",
+            parts=list(items),
+            progress=1.0,
+        )
+        idle = replace(printing, state="idle", parts=[])
+        self.history.record(printing, None, moment - 60)
+        self.history.record(idle, printing, moment)
+
+    def test_api_qc_returns_items(self):
+        self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        response = requests.get(self.url("/api/qc?date=2026-10-29"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["date"], "2026-10-29")
+        self.assertEqual(payload["total"], 4)
+        self.assertEqual(payload["positions"], 1)
+
+    def test_api_qc_defaults_to_today(self):
+        today = datetime.fromtimestamp(time.time()).date().isoformat()
+        self.complete_at(today + " 08:00", [{"name": "Корпус", "count": 35}])
+        response = requests.get(self.url("/api/qc"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["date"], today)
+        self.assertEqual(payload["total"], 35)
+
+    def test_api_qc_rejects_bad_date(self):
+        response = requests.get(self.url("/api/qc?date=март"), timeout=3)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Неверная дата", response.json()["error"])
+
+    def test_api_qc_csv(self):
+        self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
+        response = requests.get(self.url("/api/qc.csv?date=2026-10-29"), timeout=3)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["Content-Type"].startswith("text/csv"))
+        self.assertIn("utf-8", response.headers["Content-Type"])
+        lines = response.text.splitlines()
+        self.assertEqual(lines[0], "Позиция,Количество")
+        self.assertTrue(any("Крышка" in line and "4" in line for line in lines[1:]))
+
+    def test_api_qc_csv_rejects_bad_date(self):
+        response = requests.get(self.url("/api/qc.csv?date=нет"), timeout=3)
+        self.assertEqual(response.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

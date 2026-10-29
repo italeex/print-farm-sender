@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import logging.handlers
@@ -32,7 +34,7 @@ from farm_core import (
     print_action,
     save_config,
 )
-from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore
+from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore, _iso_day
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
@@ -370,6 +372,12 @@ class FarmHandler(BaseHTTPRequestHandler):
         if path == "/api/plan/calendar":
             self._api_plan_calendar(query)
             return
+        if path == "/api/qc":
+            self._api_qc(query)
+            return
+        if path == "/api/qc.csv":
+            self._api_qc_csv(query)
+            return
         if path.startswith("/api/history/"):
             self._api_history(path[len("/api/history/"):], query)
             return
@@ -575,6 +583,32 @@ class FarmHandler(BaseHTTPRequestHandler):
             self._send_error(400, str(exc) or "Некорректный месяц")
             return
         self._send_json(payload)
+
+    def _api_qc(self, query) -> None:
+        day = self._qc_day(query)
+        if day is None:
+            return
+        self._send_json(self.app.history.qc(day))
+
+    def _api_qc_csv(self, query) -> None:
+        day = self._qc_day(query)
+        if day is None:
+            return
+        report = self.app.history.qc(day)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["Позиция", "Количество"])
+        for item in report.get("items") or []:
+            writer.writerow([item.get("name") or item.get("code") or "", item.get("count") or 0])
+        self._send_csv(buf.getvalue())
+
+    def _qc_day(self, query) -> str | None:
+        raw = self._query_text(query, "date")
+        day = _iso_day(raw) if raw else date.today().isoformat()
+        if not day:
+            self._send_error(400, "Неверная дата")
+            return None
+        return day
 
     def _api_fs(self, query) -> None:
         raw = self._query_text(query, "path")
@@ -1189,6 +1223,16 @@ class FarmHandler(BaseHTTPRequestHandler):
         content_type = MIME_TYPES.get(path.suffix.lower(), "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in CACHE_HEADERS.items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_csv(self, text: str) -> None:
+        body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         for name, value in CACHE_HEADERS.items():
             self.send_header(name, value)
