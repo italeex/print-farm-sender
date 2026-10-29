@@ -3169,9 +3169,7 @@ function renderPlanProgress(container, period) {
   }
   const rawTarget = period ? (period.parts_target !== undefined ? period.parts_target : period.target) : 0;
   const rawDone = period ? (period.parts_done !== undefined ? period.parts_done : period.actual) : 0;
-  const rawLive = period
-    ? (period.parts_in_progress !== undefined ? period.parts_in_progress : period.in_progress)
-    : 0;
+  const rawLive = period ? period.parts_in_progress : 0;
   const target = Number(rawTarget) || 0;
   const done = Math.max(0, Number(rawDone) || 0);
   const live = Math.max(0, Number(rawLive) || 0);
@@ -3179,13 +3177,15 @@ function renderPlanProgress(container, period) {
     track.hidden = true;
     track.removeAttribute("title");
     container.removeAttribute("title");
+    doneBar.style.width = "0%";
+    liveBar.style.width = "0%";
     label.textContent = "план не задан";
     return;
   }
   track.hidden = false;
   const accounted = done + live;
-  const donePct = Math.round((done / target) * 100);
-  const livePct = Math.round((live / target) * 100);
+  const donePct = Math.min(100, Math.round((done / target) * 100));
+  const livePct = Math.min(100, Math.round((live / target) * 100));
   const doneWidth = Math.min(100, (done / target) * 100);
   const liveWidth = done >= target ? 0 : Math.min(100 - doneWidth, (live / target) * 100);
   doneBar.style.width = doneWidth + "%";

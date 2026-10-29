@@ -716,6 +716,7 @@ body.compact .grid { gap: 10px; }
   display: flex; height: 8px; border-radius: 999px; overflow: hidden;
   background: #0c0f15; border: 1px solid var(--border-soft);
 }
+.plan-progress-track[hidden] { display: none; }
 .plan-progress-track .progress-done { display: block; height: 100%; background: var(--success); transition: width .25s ease; }
 .plan-progress-track .progress-live { display: block; height: 100%; background: var(--accent); transition: width .25s ease; }
 .plan-progress-label { margin-top: 6px; font-size: 12px; font-family: var(--mono); color: var(--muted); }
