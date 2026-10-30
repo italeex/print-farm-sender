@@ -926,6 +926,33 @@ class HistoryStoreTests(unittest.TestCase):
         ).fetchone()
         self.assertIsNone(mark)
 
+    def _write_gcode(self, name, text):
+        target = self.path.parent / name
+        target.write_bytes(text.encode("utf-8"))
+        return str(target)
+
+    def test_set_catalog_parses_36_copies(self):
+        body = "\n".join(f"EXCLUDE_OBJECT_DEFINE NAME=part_id_{i}_copy_{i}" for i in range(36))
+        path = self._write_gcode("plate36.gcode", body + "\n")
+        item = self.history.set_catalog("PART36", number=1, file_path=path)
+        self.assertEqual(item["quantity"], 36)
+        self.assertEqual(self.history.catalog()[0]["quantity"], 36)
+        self.assertEqual(self.history.catalog_map()["PART36"]["quantity"], 36)
+
+    def test_set_catalog_no_markers_quantity_one(self):
+        path = self._write_gcode("plain.gcode", "; no objects here\nG1 X1 Y1\n")
+        item = self.history.set_catalog("PLAIN", number=2, file_path=path)
+        self.assertEqual(item["quantity"], 1)
+
+    def test_set_catalog_number_change_keeps_quantity(self):
+        body = "\n".join(f"EXCLUDE_OBJECT_DEFINE NAME=part_id_{i}_copy_{i}" for i in range(5))
+        path = self._write_gcode("plate5.gcode", body + "\n")
+        item = self.history.set_catalog("PART5", number=3, file_path=path)
+        self.assertEqual(item["quantity"], 5)
+        renumbered = self.history.set_catalog("PART5", number=7)
+        self.assertEqual(renumbered["quantity"], 5)
+        self.assertEqual(renumbered["number"], 7)
+
     def test_events_event_ts_index(self):
         names = {str(row[1]) for row in self.history._conn.execute("PRAGMA index_list('events')")}
         self.assertIn("events_event_ts", names)
