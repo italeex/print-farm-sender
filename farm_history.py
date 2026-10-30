@@ -18,7 +18,7 @@ RETENTION_SECONDS = 180 * 86400
 PRUNE_INTERVAL = 86400
 EVENT_LIMIT = 500
 _NUMBER_RE = re.compile(r"^(?:N)?(\d+)(?:\.(?:gcode|stl))?$", re.IGNORECASE)
-_NUMERIC_KEY_RE = re.compile(r"^N?\d+(?:\.GCODE)?$", re.IGNORECASE)
+_NUMERIC_KEY_RE = re.compile(r"^N?\d+(?:\.(?:GCODE|STL))?$", re.IGNORECASE)
 _STRIP_3D_RE = re.compile(r"\s*\(3D\)\s*$", re.IGNORECASE)
 
 
@@ -404,14 +404,20 @@ class HistoryStore:
         message = None
         if kind == "complete":
             file_value = str(previous.file or "") or filename
-            payload = []
+            raws = []
             for part in previous.parts or []:
                 if isinstance(part, dict):
-                    raw_name = part.get("name")
-                    count = part.get("count")
+                    raws.append((part.get("name"), part.get("count")))
                 else:
-                    raw_name = getattr(part, "name", "")
-                    count = getattr(part, "count", 0)
+                    raws.append((getattr(part, "name", ""), getattr(part, "count", 0)))
+            batch_map: dict = {}
+            if any(_is_numeric_name(raw) for raw, _ in raws):
+                try:
+                    batch_map = self.number_map()
+                except Exception:
+                    batch_map = {}
+            payload = []
+            for raw_name, count in raws:
                 try:
                     amount = int(count or 0)
                 except (TypeError, ValueError):
@@ -419,7 +425,7 @@ class HistoryStore:
                 if amount <= 0:
                     continue
                 try:
-                    resolved = self.resolve_part(raw_name, file_value)
+                    resolved = self.resolve_part(raw_name, file_value, batch_map)
                 except Exception:
                     try:
                         resolved = part_key(raw_name)
@@ -726,6 +732,29 @@ class HistoryStore:
             catalog = self.catalog_map()
         except Exception:
             catalog = {}
+        try:
+            qc_map: dict = {}
+            need_qc_map = False
+            for row in rows:
+                try:
+                    probe = json.loads(row["parts_json"] or "[]")
+                except ValueError:
+                    continue
+                if not isinstance(probe, list):
+                    continue
+                for part in probe:
+                    if isinstance(part, dict) and _is_numeric_name(part.get("name") or ""):
+                        need_qc_map = True
+                        break
+                if need_qc_map:
+                    break
+            if need_qc_map:
+                try:
+                    qc_map = self.number_map()
+                except Exception:
+                    qc_map = {}
+        except Exception:
+            qc_map = {}
         entries: dict[str, dict] = {}
         for row in rows:
             try:
@@ -739,7 +768,7 @@ class HistoryStore:
                 if not isinstance(part, dict):
                     continue
                 try:
-                    key = self.resolve_part(part.get("name") or "", filename)
+                    key = self.resolve_part(part.get("name") or "", filename, qc_map)
                 except Exception:
                     try:
                         key = part_key(part.get("name") or "")
@@ -904,14 +933,22 @@ class HistoryStore:
             }
         return result
 
-    def resolve_part(self, name, filename=None) -> str:
+    def resolve_part(self, name, filename=None, mapping=None) -> str:
         text = str(name or "").strip()
         if not text:
             number = _extract_number(filename) if filename else None
-            if number is not None:
-                target = self.number_map().get(number)
-                if target:
-                    return str(target["part_key"])
+            if number is None:
+                return ""
+            if mapping is None:
+                try:
+                    mapping = self.number_map()
+                except Exception:
+                    mapping = {}
+            elif not isinstance(mapping, dict):
+                mapping = {}
+            target = mapping.get(number)
+            if target:
+                return str(target["part_key"])
             return ""
         try:
             key = part_key(text)
@@ -919,9 +956,12 @@ class HistoryStore:
             key = ""
         if key and _NUMERIC_KEY_RE.match(key) is None:
             return key
-        try:
-            mapping = self.number_map()
-        except Exception:
+        if mapping is None:
+            try:
+                mapping = self.number_map()
+            except Exception:
+                mapping = {}
+        elif not isinstance(mapping, dict):
             mapping = {}
         file_number = _extract_number(filename) if filename else None
         if file_number is not None and file_number in mapping and _is_numeric_name(text):
@@ -1441,6 +1481,26 @@ class HistoryStore:
                 "ORDER BY ts ASC, id ASC"
             ).fetchall()
         result: dict[str, list[float]] = {}
+        durations_map: dict = {}
+        need_durations_map = False
+        for row in rows:
+            try:
+                probe = json.loads(row["parts_json"] or "[]")
+            except ValueError:
+                continue
+            if not isinstance(probe, list):
+                continue
+            for part in probe:
+                if isinstance(part, dict) and _is_numeric_name(part.get("name") or ""):
+                    need_durations_map = True
+                    break
+            if need_durations_map:
+                break
+        if need_durations_map:
+            try:
+                durations_map = self.number_map()
+            except Exception:
+                durations_map = {}
         for row in rows:
             try:
                 length = float(row["duration"])
@@ -1457,7 +1517,7 @@ class HistoryStore:
                 if not isinstance(part, dict):
                     continue
                 try:
-                    key = self.resolve_part(part.get("name") or "", filename)
+                    key = self.resolve_part(part.get("name") or "", filename, durations_map)
                 except Exception:
                     try:
                         key = part_key(part.get("name") or "")
@@ -1686,6 +1746,26 @@ class HistoryStore:
                 (start, end),
             ).fetchall()
         totals: dict[tuple[str, str], int] = {}
+        need_map = False
+        for row in rows:
+            try:
+                probe = json.loads(row["parts_json"] or "[]")
+            except (OverflowError, ValueError):
+                continue
+            if not isinstance(probe, list):
+                continue
+            for part in probe:
+                if isinstance(part, dict) and _is_numeric_name(part.get("name") or ""):
+                    need_map = True
+                    break
+            if need_map:
+                break
+        batch_map: dict = {}
+        if need_map:
+            try:
+                batch_map = self.number_map()
+            except Exception:
+                batch_map = {}
         for row in rows:
             try:
                 day = _day_of(float(row["ts"]))
@@ -1701,7 +1781,7 @@ class HistoryStore:
                 if not isinstance(part, dict):
                     continue
                 try:
-                    key = self.resolve_part(part.get("name") or "", filename)
+                    key = self.resolve_part(part.get("name") or "", filename, batch_map)
                 except Exception:
                     try:
                         key = part_key(part.get("name") or "")

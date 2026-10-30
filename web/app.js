@@ -2587,8 +2587,7 @@ function renderShift() {
       shiftAppendCell(row, task.printer || task.printer_key || "—");
       shiftAppendCell(row, shiftFormatHM(task.start), "shift-num");
       shiftAppendCell(row, shiftFormatFinish(task.start, task.finish), "shift-num");
-      shiftAppendCell(row, task.number === null || task.number === undefined ? "—" : task.number, "shift-num");
-      shiftAppendCell(row, task.name || task.part_key || "—", "shift-name");
+      shiftAppendCell(row, partLabel({ name: task.name, code: task.code, part_key: task.part_key }), "shift-name");
       shiftAppendCell(row, task.file_ready ? "готов" : "нужна загрузка", "shift-file");
       row.className = task.file_ready ? "shift-ok" : "shift-need";
       shiftPrintersBodyEl.appendChild(row);
@@ -2602,12 +2601,11 @@ function renderShift() {
   if (shiftUnscheduledBodyEl) {
     shiftUnscheduledBodyEl.textContent = "";
     const sorted = unscheduled.slice().sort(function (a, b) {
-      return Number(a.number) - Number(b.number);
+      return String(a.name || a.part_key || "").localeCompare(String(b.name || b.part_key || ""), "ru");
     });
     for (const item of sorted) {
       const row = document.createElement("tr");
-      shiftAppendCell(row, item.number === null || item.number === undefined ? "—" : item.number, "shift-num");
-      shiftAppendCell(row, item.name || item.part_key || "—", "shift-name");
+      shiftAppendCell(row, partLabel({ name: item.name, code: item.code, part_key: item.part_key }), "shift-name");
       shiftAppendCell(row, item.remaining === null || item.remaining === undefined ? "—" : item.remaining, "shift-num");
       shiftAppendCell(row, item.reason || "—");
       shiftUnscheduledBodyEl.appendChild(row);

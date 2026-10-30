@@ -34,7 +34,7 @@ from farm_core import (
     print_action,
     save_config,
 )
-from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore, _iso_day, qc_position_text
+from farm_history import PERIODS, RETENTION_SECONDS, HistoryStore, _is_numeric_name, _iso_day, qc_position_text
 from farm_jobs import JobError, JobManager
 from farm_monitor import FarmMonitor
 from farm_net import detect_ui, local_subnet, scan_subnet
@@ -335,6 +335,27 @@ class FarmApp:
             catalog = history.catalog_map() if hasattr(history, "catalog_map") else {}
         except Exception:
             catalog = {}
+        need_map = False
+        for view in printers:
+            if not isinstance(view, dict):
+                continue
+            for part in view.get("parts") or []:
+                if not isinstance(part, dict):
+                    continue
+                try:
+                    if _is_numeric_name(part.get("name") or ""):
+                        need_map = True
+                        break
+                except Exception:
+                    continue
+            if need_map:
+                break
+        batch_map: dict = {}
+        if need_map:
+            try:
+                batch_map = history.number_map() if hasattr(history, "number_map") else {}
+            except Exception:
+                batch_map = {}
         for view in printers:
             if not isinstance(view, dict):
                 continue
@@ -353,7 +374,7 @@ class FarmApp:
                 key = ""
                 if callable(resolve):
                     try:
-                        key = str(resolve(raw, filename) or "")
+                        key = str(resolve(raw, filename, batch_map) or "")
                     except Exception:
                         key = ""
                 if not key:
@@ -967,7 +988,32 @@ class FarmHandler(BaseHTTPRequestHandler):
             catalog = history.catalog_map() if hasattr(history, "catalog_map") else {}
         except Exception:
             catalog = {}
-        for view in self.app.monitor.snapshot().get("printers") or []:
+        live_map: dict = {}
+        need_live_map = False
+        try:
+            snapshot_views = self.app.monitor.snapshot().get("printers") or []
+        except Exception:
+            snapshot_views = []
+        for view in snapshot_views:
+            if not isinstance(view, dict):
+                continue
+            for item in view.get("parts") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    if _is_numeric_name(item.get("name") or ""):
+                        need_live_map = True
+                        break
+                except Exception:
+                    continue
+            if need_live_map:
+                break
+        if need_live_map:
+            try:
+                live_map = history.number_map() if hasattr(history, "number_map") else {}
+            except Exception:
+                live_map = {}
+        for view in snapshot_views:
             if str(view.get("state") or "") not in ("printing", "paused"):
                 continue
             filename = str(view.get("file") or "")
@@ -978,7 +1024,7 @@ class FarmHandler(BaseHTTPRequestHandler):
                 key = ""
                 if callable(resolve):
                     try:
-                        key = str(resolve(raw, filename) or "")
+                        key = str(resolve(raw, filename, live_map) or "")
                     except Exception:
                         key = ""
                 if not key:
