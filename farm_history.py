@@ -7,9 +7,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from farm_core import APP_DIR
+from farm_parts import parse_parts_bytes
 from farm_plan import part_key, split_code_name
 
 HISTORY_PATH = APP_DIR / "farm_history.db"
+PLATE_SCAN_BYTES = 8 * 1024 * 1024
 PERIODS = ("day", "week", "month")
 RETENTION_SECONDS = 180 * 86400
 PRUNE_INTERVAL = 86400
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS parts_catalog (
     file_path TEXT,
     file_size INTEGER,
     file_mtime REAL,
+    quantity INTEGER NOT NULL DEFAULT 0,
     updated_at REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS parts_catalog_number ON parts_catalog(number) WHERE number IS NOT NULL;
@@ -86,6 +89,28 @@ CREATE TABLE IF NOT EXISTS schedule_tasks (
 );
 CREATE INDEX IF NOT EXISTS schedule_tasks_date ON schedule_tasks (date);
 """
+
+
+def _plate_quantity(data: bytes) -> int:
+    """Число копий детали на одной пластине.
+
+    Gcode повторяет EXCLUDE_OBJECT_DEFINE для каждого экземпляра;
+    суффиксы _id_<n>_copy_<n> уже сняты parse_parts_bytes. У одной
+    детали на пластине все маркеры относятся к ней, поэтому quantity —
+    наибольшее число маркеров одного имени. Без маркеров — 1.
+    """
+    parts = parse_parts_bytes(data or b"")
+    if not parts:
+        return 1
+    return max(int(part.count) for part in parts)
+
+
+def _plate_quantity_for_file(target) -> int:
+    try:
+        with open(target, "rb") as handle:
+            return _plate_quantity(handle.read(PLATE_SCAN_BYTES))
+    except OSError:
+        raise ValueError("Не удалось прочитать файл") from None
 
 
 def _event_type(previous, state, first):
@@ -758,8 +783,8 @@ class HistoryStore:
             self._seed_catalog_events_locked()
             self._conn.commit()
             rows = self._conn.execute(
-                "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
-                "FROM parts_catalog "
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
+                "quantity FROM parts_catalog "
                 "ORDER BY CASE WHEN number IS NULL THEN 1 ELSE 0 END, number, part_key"
             ).fetchall()
         return [self._catalog_row(row) for row in rows]
@@ -769,7 +794,8 @@ class HistoryStore:
             self._ensure_catalog_schema_locked()
             try:
                 rows = self._conn.execute(
-                    "SELECT part_key, number, code, name, file_path, file_size, file_mtime FROM parts_catalog"
+                    "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
+                    "quantity FROM parts_catalog"
                 ).fetchall()
             except sqlite3.Error:
                 return {}
@@ -787,6 +813,7 @@ class HistoryStore:
         file_value = None
         file_size = None
         file_mtime = None
+        quantity = None
         if file_path is not None:
             text = str(file_path).strip()
             if text:
@@ -800,6 +827,9 @@ class HistoryStore:
                 file_value = str(target)
                 file_size = stat.st_size
                 file_mtime = stat.st_mtime
+                quantity = _plate_quantity_for_file(target)
+            else:
+                quantity = 0
         with self._lock:
             self._ensure_catalog_schema_locked()
             self._seed_catalog_plans_locked()
@@ -813,8 +843,8 @@ class HistoryStore:
                 if clash is not None:
                     raise ValueError(f"Номер {number} уже занят")
             row = self._conn.execute(
-                "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
-                "FROM parts_catalog WHERE part_key = ?",
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
+                "quantity FROM parts_catalog WHERE part_key = ?",
                 (key,),
             ).fetchone()
             try:
@@ -825,8 +855,18 @@ class HistoryStore:
                         assigned = self._next_number_locked()
                     self._conn.execute(
                         "INSERT INTO parts_catalog (part_key, number, code, name, file_path, file_size, "
-                        "file_mtime, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (key, assigned, code, name, file_value, file_size, file_mtime, self._clock()),
+                        "file_mtime, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            key,
+                            assigned,
+                            code,
+                            name,
+                            file_value,
+                            file_size,
+                            file_mtime,
+                            quantity if quantity is not None else 0,
+                            self._clock(),
+                        ),
                     )
                 else:
                     assigned = number if number is not None else row["number"]
@@ -839,18 +879,22 @@ class HistoryStore:
                         file_value = row["file_path"]
                         file_size = row["file_size"]
                         file_mtime = row["file_mtime"]
+                        try:
+                            quantity = int(row["quantity"])
+                        except (KeyError, TypeError, ValueError):
+                            quantity = 0
                     self._conn.execute(
                         "UPDATE parts_catalog SET number = ?, file_path = ?, file_size = ?, "
-                        "file_mtime = ?, updated_at = ? WHERE part_key = ?",
-                        (assigned, file_value, file_size, file_mtime, self._clock(), key),
+                        "file_mtime = ?, quantity = ?, updated_at = ? WHERE part_key = ?",
+                        (assigned, file_value, file_size, file_mtime, quantity or 0, self._clock(), key),
                     )
                 self._conn.commit()
             except sqlite3.IntegrityError:
                 self._conn.rollback()
                 raise ValueError(f"Номер {assigned} уже занят") from None
             fresh = self._conn.execute(
-                "SELECT part_key, number, code, name, file_path, file_size, file_mtime "
-                "FROM parts_catalog WHERE part_key = ?",
+                "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
+                "quantity FROM parts_catalog WHERE part_key = ?",
                 (key,),
             ).fetchone()
         return self._catalog_row(fresh)
@@ -869,6 +913,10 @@ class HistoryStore:
             mtime = float(row["file_mtime"]) if row["file_mtime"] is not None else None
         except (TypeError, ValueError):
             mtime = None
+        try:
+            quantity = int(row["quantity"]) if row["quantity"] is not None else 0
+        except (KeyError, TypeError, ValueError):
+            quantity = 0
         return {
             "part_key": str(row["part_key"]),
             "number": number,
@@ -877,13 +925,15 @@ class HistoryStore:
             "file_path": str(row["file_path"]) if row["file_path"] else None,
             "file_size": size,
             "file_mtime": mtime,
+            "quantity": max(quantity, 0),
         }
 
     def _ensure_catalog_schema_locked(self) -> None:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS parts_catalog ("
             "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
-            "file_path TEXT, file_size INTEGER, file_mtime REAL, updated_at REAL)"
+            "file_path TEXT, file_size INTEGER, file_mtime REAL, "
+            "quantity INTEGER NOT NULL DEFAULT 0, updated_at REAL)"
         )
         catalog_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(parts_catalog)")}
         for column, kind in (
@@ -893,6 +943,7 @@ class HistoryStore:
             ("file_path", "TEXT"),
             ("file_size", "INTEGER"),
             ("file_mtime", "REAL"),
+            ("quantity", "INTEGER NOT NULL DEFAULT 0"),
             ("updated_at", "REAL"),
         ):
             if column not in catalog_columns:
@@ -1494,7 +1545,8 @@ class HistoryStore:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS parts_catalog ("
             "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
-            "file_path TEXT, file_size INTEGER, file_mtime REAL, updated_at REAL)"
+            "file_path TEXT, file_size INTEGER, file_mtime REAL, "
+            "quantity INTEGER NOT NULL DEFAULT 0, updated_at REAL)"
         )
         catalog_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(parts_catalog)")}
         for column, kind in (
@@ -1504,6 +1556,7 @@ class HistoryStore:
             ("file_path", "TEXT"),
             ("file_size", "INTEGER"),
             ("file_mtime", "REAL"),
+            ("quantity", "INTEGER NOT NULL DEFAULT 0"),
             ("updated_at", "REAL"),
         ):
             if column not in catalog_columns:

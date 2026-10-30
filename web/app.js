@@ -4372,6 +4372,13 @@ function renderCatalog() {
         size.textContent = formatBytes(item.file_size);
         refCell.appendChild(size);
       }
+      const copies = Number(item.quantity);
+      if (Number.isFinite(copies) && copies > 1) {
+        const count = document.createElement("small");
+        count.textContent = "×" + copies;
+        count.title = copies + " шт. на пластине";
+        refCell.appendChild(count);
+      }
     } else {
       const missing = document.createElement("span");
       missing.className = "muted";
