@@ -10,6 +10,7 @@ import requests
 FARM_DIR = "FARM"
 FARM_PREFIX = "FARM_"
 TIMEOUT = 10
+UPLOAD_TIMEOUT = 600
 
 NAME_PATTERN = re.compile(r"^N\d+\.gcode$")
 
@@ -43,6 +44,7 @@ def _client(session):
         yield session
     else:
         with requests.Session() as fresh:
+            fresh.trust_env = False
             yield fresh
 
 
@@ -110,7 +112,7 @@ def _post_upload(client, printer, file_path: Path, remote: str, folder: bool):
                 f"{printer.base_url}/server/files/upload",
                 data=data,
                 files={"file": (remote, handle)},
-                timeout=TIMEOUT,
+                timeout=UPLOAD_TIMEOUT,
             )
         except requests.RequestException as exc:
             raise FarmFileError(f"Не удалось загрузить файл {remote}: {exc}") from exc
