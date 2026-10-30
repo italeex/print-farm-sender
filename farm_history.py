@@ -416,6 +416,12 @@ class HistoryStore:
                     batch_map = self.number_map()
                 except Exception:
                     batch_map = {}
+            batch_keys = None
+            if any(not _is_numeric_name(raw) for raw, _ in raws):
+                try:
+                    batch_keys = self.catalog_keys()
+                except Exception:
+                    batch_keys = None
             payload = []
             for raw_name, count in raws:
                 try:
@@ -425,7 +431,7 @@ class HistoryStore:
                 if amount <= 0:
                     continue
                 try:
-                    resolved = self.resolve_part(raw_name, file_value, batch_map)
+                    resolved = self.resolve_part(raw_name, file_value, batch_map, batch_keys)
                 except Exception:
                     try:
                         resolved = part_key(raw_name)
@@ -734,7 +740,9 @@ class HistoryStore:
             catalog = {}
         try:
             qc_map: dict = {}
+            qc_keys = None
             need_qc_map = False
+            need_qc_keys = False
             for row in rows:
                 try:
                     probe = json.loads(row["parts_json"] or "[]")
@@ -743,18 +751,29 @@ class HistoryStore:
                 if not isinstance(probe, list):
                     continue
                 for part in probe:
-                    if isinstance(part, dict) and _is_numeric_name(part.get("name") or ""):
+                    if not isinstance(part, dict):
+                        continue
+                    if _is_numeric_name(part.get("name") or ""):
                         need_qc_map = True
+                    else:
+                        need_qc_keys = True
+                    if need_qc_map and need_qc_keys:
                         break
-                if need_qc_map:
+                if need_qc_map and need_qc_keys:
                     break
             if need_qc_map:
                 try:
                     qc_map = self.number_map()
                 except Exception:
                     qc_map = {}
+            if need_qc_keys:
+                try:
+                    qc_keys = self.catalog_keys()
+                except Exception:
+                    qc_keys = None
         except Exception:
             qc_map = {}
+            qc_keys = None
         entries: dict[str, dict] = {}
         for row in rows:
             try:
@@ -768,7 +787,7 @@ class HistoryStore:
                 if not isinstance(part, dict):
                     continue
                 try:
-                    key = self.resolve_part(part.get("name") or "", filename, qc_map)
+                    key = self.resolve_part(part.get("name") or "", filename, qc_map, qc_keys)
                 except Exception:
                     try:
                         key = part_key(part.get("name") or "")
@@ -933,7 +952,16 @@ class HistoryStore:
             }
         return result
 
-    def resolve_part(self, name, filename=None, mapping=None) -> str:
+    def catalog_keys(self) -> set[str]:
+        with self._lock:
+            self._ensure_catalog_schema_locked()
+            try:
+                rows = self._conn.execute("SELECT part_key FROM parts_catalog").fetchall()
+            except sqlite3.Error:
+                return set()
+        return {str(row["part_key"]) for row in rows if str(row["part_key"] or "").strip()}
+
+    def resolve_part(self, name, filename=None, mapping=None, catalog_keys=None) -> str:
         text = str(name or "").strip()
         if not text:
             number = _extract_number(filename) if filename else None
@@ -955,7 +983,15 @@ class HistoryStore:
         except Exception:
             key = ""
         if key and _NUMERIC_KEY_RE.match(key) is None:
-            return key
+            if catalog_keys is None:
+                return key
+            if key in catalog_keys:
+                return key
+            best = ""
+            for known in catalog_keys:
+                if known and known in key and len(known) > len(best):
+                    best = known
+            return best or key
         if mapping is None:
             try:
                 mapping = self.number_map()
@@ -1167,6 +1203,14 @@ class HistoryStore:
                 }
             except sqlite3.Error:
                 numbered = set()
+            try:
+                present_keys = {
+                    str(row[0])
+                    for row in self._conn.execute("SELECT part_key FROM parts_catalog").fetchall()
+                    if str(row[0] or "").strip()
+                }
+            except sqlite3.Error:
+                present_keys = set()
             known: dict[str, tuple[str, str]] = {}
             for row in rows:
                 try:
@@ -1204,6 +1248,10 @@ class HistoryStore:
                     except Exception:
                         continue
                     if not key or key in known:
+                        continue
+                    if key not in present_keys and any(
+                        known_key and known_key in key for known_key in present_keys | set(known)
+                    ):
                         continue
                     code, name = split_code_name(raw)
                     known[key] = (code, name)
@@ -1482,7 +1530,9 @@ class HistoryStore:
             ).fetchall()
         result: dict[str, list[float]] = {}
         durations_map: dict = {}
+        durations_keys = None
         need_durations_map = False
+        need_durations_keys = False
         for row in rows:
             try:
                 probe = json.loads(row["parts_json"] or "[]")
@@ -1491,16 +1541,26 @@ class HistoryStore:
             if not isinstance(probe, list):
                 continue
             for part in probe:
-                if isinstance(part, dict) and _is_numeric_name(part.get("name") or ""):
+                if not isinstance(part, dict):
+                    continue
+                if _is_numeric_name(part.get("name") or ""):
                     need_durations_map = True
+                else:
+                    need_durations_keys = True
+                if need_durations_map and need_durations_keys:
                     break
-            if need_durations_map:
+            if need_durations_map and need_durations_keys:
                 break
         if need_durations_map:
             try:
                 durations_map = self.number_map()
             except Exception:
                 durations_map = {}
+        if need_durations_keys:
+            try:
+                durations_keys = self.catalog_keys()
+            except Exception:
+                durations_keys = None
         for row in rows:
             try:
                 length = float(row["duration"])
@@ -1517,7 +1577,7 @@ class HistoryStore:
                 if not isinstance(part, dict):
                     continue
                 try:
-                    key = self.resolve_part(part.get("name") or "", filename, durations_map)
+                    key = self.resolve_part(part.get("name") or "", filename, durations_map, durations_keys)
                 except Exception:
                     try:
                         key = part_key(part.get("name") or "")
@@ -1722,11 +1782,37 @@ class HistoryStore:
             entry["days"].setdefault(day, {"date": day, "target": 0, "actual": 0})["actual"] += count
         items = []
         numbers = self._catalog_numbers_locked()
+        try:
+            details = {}
+            for row in self._conn.execute(
+                "SELECT part_key, number, code, name FROM parts_catalog"
+            ):
+                try:
+                    number = int(row["number"]) if row["number"] is not None else None
+                except (TypeError, ValueError):
+                    number = None
+                details[str(row["part_key"])] = {
+                    "number": number,
+                    "code": str(row["code"] or ""),
+                    "name": str(row["name"] or ""),
+                }
+        except sqlite3.Error:
+            details = {}
         for key in sorted(entries):
             entry = entries[key]
             entry["percent"] = round(entry["actual"] / entry["target"] * 100.0, 1) if entry["target"] > 0 else 0.0
             entry["days"] = [entry["days"][day] for day in sorted(entry["days"])]
-            entry["number"] = numbers.get(key)
+            item = details.get(key)
+            if item is not None:
+                if not entry["code"] and item["code"]:
+                    entry["code"] = item["code"]
+                if not entry["name"] and item["name"]:
+                    entry["name"] = item["name"]
+                entry["number"] = numbers.get(key)
+                if entry["number"] is None:
+                    entry["number"] = item["number"]
+            else:
+                entry["number"] = numbers.get(key)
             items.append(entry)
         return items
 
@@ -1747,6 +1833,7 @@ class HistoryStore:
             ).fetchall()
         totals: dict[tuple[str, str], int] = {}
         need_map = False
+        need_keys = False
         for row in rows:
             try:
                 probe = json.loads(row["parts_json"] or "[]")
@@ -1755,10 +1842,15 @@ class HistoryStore:
             if not isinstance(probe, list):
                 continue
             for part in probe:
-                if isinstance(part, dict) and _is_numeric_name(part.get("name") or ""):
+                if not isinstance(part, dict):
+                    continue
+                if _is_numeric_name(part.get("name") or ""):
                     need_map = True
+                else:
+                    need_keys = True
+                if need_map and need_keys:
                     break
-            if need_map:
+            if need_map and need_keys:
                 break
         batch_map: dict = {}
         if need_map:
@@ -1766,6 +1858,12 @@ class HistoryStore:
                 batch_map = self.number_map()
             except Exception:
                 batch_map = {}
+        batch_keys = None
+        if need_keys:
+            try:
+                batch_keys = self.catalog_keys()
+            except Exception:
+                batch_keys = None
         for row in rows:
             try:
                 day = _day_of(float(row["ts"]))
@@ -1781,7 +1879,7 @@ class HistoryStore:
                 if not isinstance(part, dict):
                     continue
                 try:
-                    key = self.resolve_part(part.get("name") or "", filename, batch_map)
+                    key = self.resolve_part(part.get("name") or "", filename, batch_map, batch_keys)
                 except Exception:
                     try:
                         key = part_key(part.get("name") or "")

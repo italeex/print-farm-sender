@@ -336,6 +336,7 @@ class FarmApp:
         except Exception:
             catalog = {}
         need_map = False
+        need_keys = False
         for view in printers:
             if not isinstance(view, dict):
                 continue
@@ -345,10 +346,13 @@ class FarmApp:
                 try:
                     if _is_numeric_name(part.get("name") or ""):
                         need_map = True
-                        break
+                    else:
+                        need_keys = True
                 except Exception:
                     continue
-            if need_map:
+                if need_map and need_keys:
+                    break
+            if need_map and need_keys:
                 break
         batch_map: dict = {}
         if need_map:
@@ -356,6 +360,12 @@ class FarmApp:
                 batch_map = history.number_map() if hasattr(history, "number_map") else {}
             except Exception:
                 batch_map = {}
+        batch_keys = None
+        if need_keys:
+            try:
+                batch_keys = history.catalog_keys() if hasattr(history, "catalog_keys") else None
+            except Exception:
+                batch_keys = None
         for view in printers:
             if not isinstance(view, dict):
                 continue
@@ -374,7 +384,7 @@ class FarmApp:
                 key = ""
                 if callable(resolve):
                     try:
-                        key = str(resolve(raw, filename, batch_map) or "")
+                        key = str(resolve(raw, filename, batch_map, batch_keys) or "")
                     except Exception:
                         key = ""
                 if not key:
@@ -989,7 +999,9 @@ class FarmHandler(BaseHTTPRequestHandler):
         except Exception:
             catalog = {}
         live_map: dict = {}
+        live_keys = None
         need_live_map = False
+        need_live_keys = False
         try:
             snapshot_views = self.app.monitor.snapshot().get("printers") or []
         except Exception:
@@ -1003,16 +1015,24 @@ class FarmHandler(BaseHTTPRequestHandler):
                 try:
                     if _is_numeric_name(item.get("name") or ""):
                         need_live_map = True
-                        break
+                    else:
+                        need_live_keys = True
                 except Exception:
                     continue
-            if need_live_map:
+                if need_live_map and need_live_keys:
+                    break
+            if need_live_map and need_live_keys:
                 break
         if need_live_map:
             try:
                 live_map = history.number_map() if hasattr(history, "number_map") else {}
             except Exception:
                 live_map = {}
+        if need_live_keys:
+            try:
+                live_keys = history.catalog_keys() if hasattr(history, "catalog_keys") else None
+            except Exception:
+                live_keys = None
         for view in snapshot_views:
             if str(view.get("state") or "") not in ("printing", "paused"):
                 continue
@@ -1024,7 +1044,7 @@ class FarmHandler(BaseHTTPRequestHandler):
                 key = ""
                 if callable(resolve):
                     try:
-                        key = str(resolve(raw, filename, live_map) or "")
+                        key = str(resolve(raw, filename, live_map, live_keys) or "")
                     except Exception:
                         key = ""
                 if not key:

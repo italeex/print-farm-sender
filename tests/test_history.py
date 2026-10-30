@@ -870,6 +870,58 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(report["items"][0]["part_key"], "ГР3.06.52020.02")
         self.assertEqual(report["items"][0]["count"], 5)
 
+    def test_actual_only_plan_row_uses_catalog(self):
+        day = self.today()
+        self.history._conn.execute(
+            "INSERT INTO parts_catalog (part_key, number, code, name, quantity, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, ?)",
+            ("ГР3.01.56010.02", 5, "МВСЛ.ГР3.01.56010.02", "ТестПоз", self.clock.now),
+        )
+        moment = (datetime.fromisoformat(day) + timedelta(hours=10)).timestamp()
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'N5.gcode', 15, ?)",
+            (KEY, moment, json.dumps([{"name": "ГР3.01.56010.02", "count": 15}], ensure_ascii=False)),
+        )
+        self.history._conn.commit()
+        noon = (datetime.fromisoformat(day) + timedelta(hours=12)).timestamp()
+        plan = self.history.plan(now=noon)["day"]
+        row = next(item for item in plan["items"] if item["key"] == "ГР3.01.56010.02")
+        self.assertEqual(row["target"], 0)
+        self.assertEqual(row["actual"], 15)
+        self.assertEqual(row["code"], "МВСЛ.ГР3.01.56010.02")
+        self.assertEqual(row["name"], "ТестПоз")
+        self.assertEqual(row["number"], 5)
+
+    def test_legacy_suffix_key_resolves_to_base(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ИМ2.01.56060.01", "code": "МВСЛ.ИМ2.01.56060.01", "name": "Ложемент", "target": 10}]
+        )
+        self.history.set_catalog("ИМ2.01.56060.01", number=21)
+        self.assertEqual(
+            self.history.resolve_part(
+                "МВСЛ.ИМ2.01.56060.01Ложемент", None, {}, self.history.catalog_keys()
+            ),
+            "ИМ2.01.56060.01",
+        )
+        moment = (datetime.fromisoformat(day) + timedelta(hours=10)).timestamp()
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'a.gcode', 4, ?)",
+            (KEY, moment, json.dumps(
+                [{"name": "МВСЛ.ИМ2.01.56060.01Ложемент", "count": 4}], ensure_ascii=False)),
+        )
+        self.history._conn.commit()
+        noon = (datetime.fromisoformat(day) + timedelta(hours=12)).timestamp()
+        plan = self.history.plan(now=noon)["day"]
+        rows = [item for item in plan["items"] if item["key"] == "ИМ2.01.56060.01"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["actual"], 4)
+        keys = [item["part_key"] for item in self.history.catalog()]
+        self.assertIn("ИМ2.01.56060.01", keys)
+        self.assertNotIn("ИМ2.01.56060.01ЛОЖЕМЕНТ", keys)
+
     def test_set_catalog_duplicate_number_rolls_back_clean(self):
         real_conn = self.history._conn
 
