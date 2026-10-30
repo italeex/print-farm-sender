@@ -273,7 +273,7 @@ class HistoryStoreTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(
             json.loads(row["parts_json"]),
-            [{"name": "Корпус", "count": 30}, {"name": "Крышка", "count": 5}],
+            [{"name": "КОРПУС", "count": 30}, {"name": "КРЫШКА", "count": 5}],
         )
         self.assertIsNone(
             self.history._conn.execute(
@@ -734,8 +734,8 @@ class HistoryStoreTests(unittest.TestCase):
         items = self.history.catalog()
         self.assertEqual([item["part_key"] for item in items], ["ГР3.01.42000.01"])
         self.assertEqual(items[0]["number"], 1)
-        self.assertEqual(items[0]["code"], "МВСЛ.ГР3.01.42000.01")
-        self.assertEqual(items[0]["name"], "Крышка")
+        self.assertEqual(items[0]["code"], "ГР3.01.42000.01")
+        self.assertEqual(items[0]["name"], "ГР3.01.42000.01")
 
     def test_catalog_ignores_malformed_parts_json(self):
         self.history._conn.execute(
@@ -815,6 +815,60 @@ class HistoryStoreTests(unittest.TestCase):
         report = self.history.qc(day)
         self.assertEqual(report["items"][0]["number"], 1)
         self.assertEqual(report["items"][0]["count"], 4)
+
+    def test_resolve_numeric_object_via_job_file(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.06.52020.02", "code": "ГР3.06.52020.02", "name": "ТестДеталь", "target": 1}]
+        )
+        self.history.set_catalog("ГР3.06.52020.02", number=12)
+        self.assertEqual(self.history.resolve_part("1.stl", "N12.gcode"), "ГР3.06.52020.02")
+        self.assertEqual(self.history.resolve_part("N12.gcode"), "ГР3.06.52020.02")
+        self.assertEqual(self.history.resolve_part("12.stl"), "ГР3.06.52020.02")
+        self.assertEqual(self.history.number_map()[12]["part_key"], "ГР3.06.52020.02")
+
+    def test_legacy_numeric_history_counts_toward_plan(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.06.52020.02", "code": "ГР3.06.52020.02", "name": "ТестДеталь", "target": 5}]
+        )
+        self.history.set_catalog("ГР3.06.52020.02", number=12)
+        moment = (datetime.fromisoformat(day) + timedelta(hours=10)).timestamp()
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'N12.gcode', 3, ?)",
+            (KEY, moment, json.dumps([{"name": "1.stl", "count": 3}], ensure_ascii=False)),
+        )
+        self.history._conn.commit()
+        noon = (datetime.fromisoformat(day) + timedelta(hours=12)).timestamp()
+        plan = self.history.plan(now=noon)["day"]
+        self.assertEqual(plan["parts_done"], 3)
+        self.assertEqual(plan["items"][0]["key"], "ГР3.06.52020.02")
+        self.assertEqual(plan["items"][0]["actual"], 3)
+
+    def test_qc_merges_legacy_and_canonical(self):
+        day = self.today()
+        self.history.import_plan(
+            [{"date": day, "key": "ГР3.06.52020.02", "code": "ГР3.06.52020.02", "name": "ТестДеталь", "target": 5}]
+        )
+        self.history.set_catalog("ГР3.06.52020.02", number=12)
+        moment = (datetime.fromisoformat(day) + timedelta(hours=8)).timestamp()
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'N12.gcode', 2, ?)",
+            (KEY, moment, json.dumps([{"name": "1.stl", "count": 2}], ensure_ascii=False)),
+        )
+        self.history._conn.execute(
+            "INSERT INTO events (printer_key, ts, event, state, file, parts, parts_json) "
+            "VALUES (?, ?, 'complete', 'idle', 'N12.gcode', 3, ?)",
+            (KEY, moment + 60, json.dumps([{"name": "ГР3.06.52020.02", "count": 3}], ensure_ascii=False)),
+        )
+        self.history._conn.commit()
+        report = self.history.qc(day)
+        self.assertEqual(report["positions"], 1)
+        self.assertEqual(report["total"], 5)
+        self.assertEqual(report["items"][0]["part_key"], "ГР3.06.52020.02")
+        self.assertEqual(report["items"][0]["count"], 5)
 
     def test_set_catalog_duplicate_number_rolls_back_clean(self):
         real_conn = self.history._conn

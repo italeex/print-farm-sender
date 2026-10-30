@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import sqlite3
 import threading
 import time
@@ -16,6 +17,43 @@ PERIODS = ("day", "week", "month")
 RETENTION_SECONDS = 180 * 86400
 PRUNE_INTERVAL = 86400
 EVENT_LIMIT = 500
+_NUMBER_RE = re.compile(r"^(?:N)?(\d+)(?:\.(?:gcode|stl))?$", re.IGNORECASE)
+_NUMERIC_KEY_RE = re.compile(r"^N?\d+(?:\.GCODE)?$", re.IGNORECASE)
+_STRIP_3D_RE = re.compile(r"\s*\(3D\)\s*$", re.IGNORECASE)
+
+
+def _base_name(value) -> str:
+    return str(value or "").replace("\\", "/").split("/")[-1].strip()
+
+
+def _extract_number(value) -> int | None:
+    text = _base_name(value)
+    if not text:
+        return None
+    match = _NUMBER_RE.match(text)
+    if match is None:
+        return None
+    try:
+        number = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _is_numeric_name(value) -> bool:
+    text = _base_name(value)
+    if not text:
+        return False
+    if _NUMBER_RE.match(text) is not None:
+        return True
+    try:
+        return _NUMERIC_KEY_RE.match(str(part_key(text) or "")) is not None
+    except Exception:
+        return False
+
+
+def _strip_3d_suffix(value) -> str:
+    return _STRIP_3D_RE.sub("", str(value or "").strip()).strip()
 EVENT_COLUMNS = "id, printer_key, ts, event, state, file, parts, duration, message"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -192,18 +230,12 @@ def _iso_day(value) -> str:
 
 
 def qc_position_text(item) -> str:
-    """Текст позиции ОТК: "Номер N · код · имя". Зеркало qcPositionText() в web/app.js."""
     data = item if isinstance(item, dict) else {}
-    name = str(data.get("name") or "")
-    code = str(data.get("code") or "")
-    base = name or code
+    name = _strip_3d_suffix(data.get("name") or "")
+    code = str(data.get("code") or "").strip()
     if name and code and code != name:
-        base = code + " · " + name
-    number = data.get("number")
-    text = "" if number is None else str(number).strip()
-    if text:
-        return "Номер " + text + (" · " + base if base else "")
-    return base or "—"
+        return name + " · " + code
+    return name or code or "—"
 
 
 def _period_dates(start: float, end: float) -> tuple[str, str, str]:
@@ -372,8 +404,30 @@ class HistoryStore:
         message = None
         if kind == "complete":
             file_value = str(previous.file or "") or filename
-            parts = _part_count(previous.parts)
-            parts_json = json.dumps(_parts_payload(previous.parts), ensure_ascii=False)
+            payload = []
+            for part in previous.parts or []:
+                if isinstance(part, dict):
+                    raw_name = part.get("name")
+                    count = part.get("count")
+                else:
+                    raw_name = getattr(part, "name", "")
+                    count = getattr(part, "count", 0)
+                try:
+                    amount = int(count or 0)
+                except (TypeError, ValueError):
+                    continue
+                if amount <= 0:
+                    continue
+                try:
+                    resolved = self.resolve_part(raw_name, file_value)
+                except Exception:
+                    try:
+                        resolved = part_key(raw_name)
+                    except Exception:
+                        resolved = str(raw_name or "")
+                payload.append({"name": resolved or str(raw_name or ""), "count": amount})
+            parts = sum(item["count"] for item in payload)
+            parts_json = json.dumps(payload, ensure_ascii=False)
         if kind == "cancelled":
             file_value = str(previous.file or "") or filename
         if kind == "error":
@@ -663,11 +717,15 @@ class HistoryStore:
         end = _local_ts(datetime(target.year, target.month, target.day, hour))
         with self._lock:
             rows = self._conn.execute(
-                "SELECT parts_json FROM events "
+                "SELECT parts_json, file FROM events "
                 "WHERE event = 'complete' AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
                 (start, end),
             ).fetchall()
             numbers = self._catalog_numbers_locked()
+        try:
+            catalog = self.catalog_map()
+        except Exception:
+            catalog = {}
         entries: dict[str, dict] = {}
         for row in rows:
             try:
@@ -676,10 +734,17 @@ class HistoryStore:
                 continue
             if not isinstance(parts, list):
                 continue
+            filename = row["file"] if "file" in row.keys() else ""
             for part in parts:
                 if not isinstance(part, dict):
                     continue
-                key = part_key(part.get("name") or "")
+                try:
+                    key = self.resolve_part(part.get("name") or "", filename)
+                except Exception:
+                    try:
+                        key = part_key(part.get("name") or "")
+                    except Exception:
+                        key = ""
                 if not key:
                     continue
                 try:
@@ -690,7 +755,15 @@ class HistoryStore:
                     continue
                 entry = entries.get(key)
                 if entry is None:
-                    code, name = split_code_name(part.get("name") or "")
+                    code = ""
+                    name = ""
+                    item = catalog.get(key)
+                    if isinstance(item, dict):
+                        code = str(item.get("code") or "")
+                        name = _strip_3d_suffix(item.get("name") or "")
+                    if not code and not name:
+                        code, name = split_code_name(part.get("name") or "")
+                        name = _strip_3d_suffix(name)
                     entry = entries[key] = {"code": code, "name": name, "count": 0}
                 entry["count"] += count
         items = [
@@ -800,6 +873,65 @@ class HistoryStore:
             except sqlite3.Error:
                 return {}
         return {str(row["part_key"]): self._catalog_row(row) for row in rows}
+
+    def number_map(self) -> dict[int, dict]:
+        with self._lock:
+            self._ensure_catalog_schema_locked()
+            try:
+                self._seed_catalog_plans_locked()
+                self._conn.commit()
+            except sqlite3.Error:
+                pass
+            try:
+                rows = self._conn.execute(
+                    "SELECT part_key, number, code, name FROM parts_catalog "
+                    "WHERE number IS NOT NULL"
+                ).fetchall()
+            except sqlite3.Error:
+                return {}
+        result: dict[int, dict] = {}
+        for row in rows:
+            try:
+                number = int(row["number"])
+            except (TypeError, ValueError):
+                continue
+            if number <= 0:
+                continue
+            result[number] = {
+                "part_key": str(row["part_key"] or ""),
+                "code": str(row["code"] or ""),
+                "name": _strip_3d_suffix(row["name"] or ""),
+            }
+        return result
+
+    def resolve_part(self, name, filename=None) -> str:
+        text = str(name or "").strip()
+        if not text:
+            number = _extract_number(filename) if filename else None
+            if number is not None:
+                target = self.number_map().get(number)
+                if target:
+                    return str(target["part_key"])
+            return ""
+        try:
+            key = part_key(text)
+        except Exception:
+            key = ""
+        if key and _NUMERIC_KEY_RE.match(key) is None:
+            return key
+        try:
+            mapping = self.number_map()
+        except Exception:
+            mapping = {}
+        file_number = _extract_number(filename) if filename else None
+        if file_number is not None and file_number in mapping and _is_numeric_name(text):
+            return str(mapping[file_number]["part_key"])
+        name_number = _extract_number(text)
+        if name_number is not None and name_number in mapping:
+            return str(mapping[name_number]["part_key"])
+        if file_number is not None and file_number in mapping:
+            return str(mapping[file_number]["part_key"])
+        return key or ""
 
     def set_catalog(self, part_key, number=None, file_path=None) -> dict:
         key = str(part_key or "").strip()
@@ -978,13 +1110,23 @@ class HistoryStore:
         try:
             last = self._catalog_event_mark_locked()
             rows = self._conn.execute(
-                "SELECT id, parts_json FROM events "
+                "SELECT id, parts_json, file FROM events "
                 "WHERE event = 'complete' AND parts_json IS NOT NULL AND id > ? ORDER BY id",
                 (last,),
             ).fetchall()
         except sqlite3.Error:
             return
         if rows:
+            try:
+                numbered = {
+                    int(row["number"])
+                    for row in self._conn.execute(
+                        "SELECT number FROM parts_catalog WHERE number IS NOT NULL"
+                    ).fetchall()
+                    if row["number"] is not None
+                }
+            except sqlite3.Error:
+                numbered = set()
             known: dict[str, tuple[str, str]] = {}
             for row in rows:
                 try:
@@ -993,13 +1135,37 @@ class HistoryStore:
                     continue
                 if not isinstance(parts, list):
                     continue
+                filename = row["file"] if "file" in row.keys() else ""
                 for part in parts:
                     if not isinstance(part, dict):
                         continue
-                    key = part_key(part.get("name") or "")
+                    raw = str(part.get("name") or "")
+                    if not raw:
+                        continue
+                    if _is_numeric_name(raw):
+                        number = _extract_number(raw)
+                        if number is None:
+                            number = _extract_number(filename)
+                        if number is not None and number in numbered:
+                            continue
+                        if number is not None:
+                            try:
+                                hit = self._conn.execute(
+                                    "SELECT part_key FROM parts_catalog WHERE number = ?",
+                                    (number,),
+                                ).fetchone()
+                            except sqlite3.Error:
+                                hit = None
+                            if hit is not None:
+                                continue
+                        continue
+                    try:
+                        key = part_key(raw)
+                    except Exception:
+                        continue
                     if not key or key in known:
                         continue
-                    code, name = split_code_name(part.get("name") or "")
+                    code, name = split_code_name(raw)
                     known[key] = (code, name)
             if known:
                 self._insert_catalog_missing_locked(known)
@@ -1270,7 +1436,7 @@ class HistoryStore:
     def part_durations(self) -> dict[str, list[float]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT duration, parts_json FROM events "
+                "SELECT duration, parts_json, file FROM events "
                 "WHERE event = 'complete' AND parts_json IS NOT NULL AND duration IS NOT NULL "
                 "ORDER BY ts ASC, id ASC"
             ).fetchall()
@@ -1286,10 +1452,17 @@ class HistoryStore:
                 continue
             if not isinstance(parts, list):
                 continue
+            filename = row["file"] if "file" in row.keys() else ""
             for part in parts:
                 if not isinstance(part, dict):
                     continue
-                key = part_key(part.get("name") or "")
+                try:
+                    key = self.resolve_part(part.get("name") or "", filename)
+                except Exception:
+                    try:
+                        key = part_key(part.get("name") or "")
+                    except Exception:
+                        key = ""
                 if key:
                     result.setdefault(key, []).append(length)
         return result
@@ -1506,12 +1679,13 @@ class HistoryStore:
             end = _local_ts(datetime.fromisoformat(last) + timedelta(days=1))
         except (OSError, OverflowError, ValueError):
             return {}
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, parts_json, file FROM events "
+                "WHERE event = 'complete' AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
+                (start, end),
+            ).fetchall()
         totals: dict[tuple[str, str], int] = {}
-        rows = self._conn.execute(
-            "SELECT ts, parts_json FROM events "
-            "WHERE event = 'complete' AND parts_json IS NOT NULL AND ts >= ? AND ts < ?",
-            (start, end),
-        )
         for row in rows:
             try:
                 day = _day_of(float(row["ts"]))
@@ -1522,10 +1696,17 @@ class HistoryStore:
                 continue
             if not isinstance(parts, list):
                 continue
+            filename = row["file"] if "file" in row.keys() else ""
             for part in parts:
                 if not isinstance(part, dict):
                     continue
-                key = part_key(part.get("name") or "")
+                try:
+                    key = self.resolve_part(part.get("name") or "", filename)
+                except Exception:
+                    try:
+                        key = part_key(part.get("name") or "")
+                    except Exception:
+                        key = ""
                 if not key:
                     continue
                 try:

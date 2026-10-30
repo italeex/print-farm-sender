@@ -919,10 +919,10 @@ function upsertCard(view) {
   const parts = Array.isArray(view.parts) ? view.parts : [];
   const partsText = parts
     .filter(function (part) {
-      return part && part.name;
+      return part && (part.name || part.code);
     })
     .map(function (part) {
-      return String(part.name) + " × " + (Number(part.count) || 0);
+      return partLabel(part) + " × " + (Number(part.count) || 0);
     })
     .join(", ");
   setText(refs.parts, partsText ? "Детали: " + partsText : "");
@@ -2736,10 +2736,10 @@ function historyPartsText(parts) {
   if (Array.isArray(parts)) {
     return parts
       .filter(function (part) {
-        return part && part.name;
+        return part && (part.name || part.code);
       })
       .map(function (part) {
-        return String(part.name) + " × " + (Number(part.count) || 0);
+        return partLabel(part) + " × " + (Number(part.count) || 0);
       })
       .join(", ");
   }
@@ -3362,21 +3362,13 @@ function renderPlanTable(items) {
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
     nameCell.className = "plan-name";
+    const label = partLabel(item);
+    const name = document.createElement("b");
+    name.textContent = label;
+    nameCell.appendChild(name);
     const number = item ? item.number : null;
     if (number !== null && number !== undefined && String(number).trim() !== "") {
-      const badge = document.createElement("span");
-      badge.className = "plan-number";
-      badge.textContent = "Номер " + String(number).trim();
-      nameCell.appendChild(badge);
-    }
-    const name = document.createElement("b");
-    name.textContent = String(item.name || item.code || item.key || "—");
-    nameCell.appendChild(name);
-    const code = String(item.code || "");
-    if (code && code !== name.textContent) {
-      const small = document.createElement("small");
-      small.textContent = code;
-      nameCell.appendChild(small);
+      nameCell.title = label + " · №" + String(number).trim();
     }
     row.appendChild(nameCell);
     const cells = [
@@ -3404,10 +3396,10 @@ function renderPlanTable(items) {
     const bar = document.createElement("i");
     bar.style.width = percent + "%";
     track.appendChild(bar);
-    const label = document.createElement("span");
-    label.textContent = percent + " %";
+    const pct = document.createElement("span");
+    pct.textContent = percent + " %";
     percentCell.appendChild(track);
-    percentCell.appendChild(label);
+    percentCell.appendChild(pct);
     row.appendChild(percentCell);
     planTableBodyEl.appendChild(row);
   }
@@ -3696,14 +3688,14 @@ function activePrinting() {
 function viewParts(view) {
   const parts = Array.isArray(view.parts) ? view.parts : [];
   return parts.filter(function (part) {
-    return part && part.name;
+    return part && (part.name || part.code);
   });
 }
 
 function partsSummary(parts) {
   return parts
     .map(function (part) {
-      return String(part.name) + " × " + (Number(part.count) || 0);
+      return partLabel(part) + " × " + (Number(part.count) || 0);
     })
     .join(", ");
 }
@@ -3728,9 +3720,9 @@ function printingGroups(active) {
   for (const view of active) {
     const printerName = view.name || view.key || "";
     for (const part of viewParts(view)) {
-      const name = String(part.name);
-      if (!groups.has(name)) groups.set(name, { name: name, count: 0, printers: [] });
-      const group = groups.get(name);
+      const label = partLabel(part);
+      if (!groups.has(label)) groups.set(label, { name: label, count: 0, printers: [] });
+      const group = groups.get(label);
       group.count += Number(part.count) || 0;
       if (printerName && group.printers.indexOf(printerName) === -1) group.printers.push(printerName);
     }
@@ -3826,15 +3818,11 @@ function qcDateLabel(key) {
 }
 
 function qcPositionText(item) {
-  const name = item && item.name ? String(item.name) : "";
+  const rawName = item && item.name ? String(item.name) : "";
+  const name = rawName.toLowerCase().endsWith("(3d)") ? rawName.slice(0, -4).trim() : rawName;
   const code = item && item.code ? String(item.code) : "";
-  let base = name || code;
-  if (name && code && code !== name) base = code + " · " + name;
-  const number = item ? item.number : null;
-  if (number !== null && number !== undefined && String(number).trim() !== "") {
-    return "Номер " + String(number).trim() + (base ? " · " + base : "");
-  }
-  return base || "—";
+  if (name && code && code !== name) return name + " · " + code;
+  return name || code || "—";
 }
 
 function renderQc(data) {
@@ -3979,11 +3967,18 @@ function adviceEtaText(item) {
   return String(raw);
 }
 
+function partLabel(part) {
+  const raw = part && typeof part === "object" ? part : {};
+  const code = String(raw.code || "").trim();
+  let name = String(raw.name || raw.part_key || raw.key || "").trim();
+  if (name.toLowerCase().endsWith("(3d)")) name = name.slice(0, -4).trim();
+  if (name.toLowerCase().endsWith(".stl")) name = name.slice(0, -4);
+  if (name && code && code !== name) return name + " · " + code;
+  return name || code || "—";
+}
+
 function advicePartTitle(part) {
-  const code = String(part.code || "").trim();
-  const name = String(part.name || part.key || "").trim();
-  if (code && name && code !== name) return code + " · " + name;
-  return code || name || "—";
+  return partLabel(part);
 }
 
 function buildAdvice() {
@@ -4348,17 +4343,11 @@ function renderCatalog() {
     row.appendChild(numberCell);
     const nameCell = document.createElement("td");
     nameCell.className = "catalog-name";
-    const code = String(item.code || "").trim();
-    const name = String(item.name || item.part_key || "—");
-    nameCell.title = code ? code + (name && name !== code ? " · " + name : "") : name;
+    const label = partLabel(item);
+    nameCell.title = label + (item.number !== null && item.number !== undefined ? " · №" + String(item.number) : "");
     const nameText = document.createElement("b");
-    nameText.textContent = name;
+    nameText.textContent = label;
     nameCell.appendChild(nameText);
-    if (code && code !== name) {
-      const codeText = document.createElement("small");
-      codeText.textContent = code;
-      nameCell.appendChild(codeText);
-    }
     row.appendChild(nameCell);
     const refCell = document.createElement("td");
     refCell.className = "catalog-ref";
@@ -4585,11 +4574,12 @@ function renderFileMatrix() {
     box.checked = state.catalogChecked.has(item.part_key);
     box.setAttribute("aria-label", "Выбрать " + (item.name || item.part_key));
     const label = document.createElement("span");
-    const number = item.number === null || item.number === undefined ? "—" : "N" + String(item.number);
-    label.textContent = number + " · " + String(item.name || item.part_key);
+    label.textContent = partLabel(item);
     nameWrap.appendChild(box);
     nameWrap.appendChild(label);
-    nameCell.title = String(item.code || item.name || item.part_key);
+    const remoteTip = remoteFileName(item) || String(item.code || item.name || item.part_key);
+    const numTip = item.number === null || item.number === undefined ? "" : " · №" + String(item.number);
+    nameCell.title = partLabel(item) + " · " + remoteTip + numTip;
     nameCell.appendChild(nameWrap);
     row.appendChild(nameCell);
     const remote = remoteFileName(item);

@@ -1331,7 +1331,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("utf-8", response.headers["Content-Type"])
         lines = response.text.splitlines()
         self.assertEqual(lines[0], "Позиция,Количество")
-        self.assertTrue(any("Крышка" in line and "4" in line for line in lines[1:]))
+        self.assertTrue(any("ГР3.01.42000.01" in line and "4" in line for line in lines[1:]))
+        self.assertFalse(any("Номер" in line for line in lines[1:]))
 
     def test_api_qc_csv_uses_position_text(self):
         self.complete_at("2026-10-29 08:00", [{"name": "МВСЛ.ГР3.01.42000.01 Крышка", "count": 4}])
@@ -1354,9 +1355,31 @@ class ApiTests(unittest.TestCase):
         lines = response.text.splitlines()
         self.assertEqual(lines[0], "Позиция,Количество")
         self.assertTrue(
-            any("Номер 7" in line and "Крышка" in line and "4" in line for line in lines[1:]),
+            any("ГР3.01.42000.01" in line and "4" in line for line in lines[1:]),
             lines,
         )
+        self.assertFalse(any("Номер" in line for line in lines[1:]))
+
+    def test_state_parts_carry_code(self):
+        today = datetime.fromtimestamp(time.time()).date().isoformat()
+        self.history.import_plan(
+            [{"date": today, "key": "ГР3.06.52020.02", "code": "ГР3.06.52020.02", "name": "ТестДеталь", "target": 5}]
+        )
+        self.history.set_catalog("ГР3.06.52020.02", number=12)
+        self.monitor.view = replace(
+            self.monitor.view,
+            state="printing",
+            file="N12.gcode",
+            parts=[{"name": "1.stl", "count": 2}],
+        )
+        payload = requests.get(self.url("/api/state"), timeout=3).json()
+        view = next(item for item in payload["printers"] if item["key"] == self.key)
+        self.assertEqual(view["file"], "N12.gcode")
+        self.assertEqual(len(view["parts"]), 1)
+        part = view["parts"][0]
+        self.assertEqual(part["count"], 2)
+        self.assertEqual(part["code"], "ГР3.06.52020.02")
+        self.assertIn("ТестДеталь", part["name"])
 
     def test_api_catalog_get_lists_items(self):
         self.history.import_plan(
@@ -1368,7 +1391,7 @@ class ApiTests(unittest.TestCase):
         items = response.json()["items"]
         by_key = {item["part_key"]: item for item in items}
         self.assertEqual(by_key["a"]["number"], 1)
-        self.assertEqual(by_key["ГР3.01.42000.01"]["code"], "МВСЛ.ГР3.01.42000.01")
+        self.assertEqual(by_key["ГР3.01.42000.01"]["code"], "ГР3.01.42000.01")
         self.assertEqual(by_key["ГР3.01.42000.01"]["number"], 2)
 
     def test_api_catalog_post_sets_number(self):

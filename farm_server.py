@@ -309,6 +309,10 @@ class FarmApp:
 
     def state_snapshot(self) -> dict:
         snapshot = self.monitor.snapshot()
+        try:
+            self._enrich_live_parts(snapshot)
+        except Exception:
+            LOGGER.exception("Не удалось обогатить детали каталогом")
         snapshot["job"] = self.job.snapshot()
         snapshot["config"] = {
             "path": str(self.config_path),
@@ -320,6 +324,67 @@ class FarmApp:
         snapshot["version"] = APP_VERSION
         snapshot["started_at"] = self.started_at
         return snapshot
+
+    def _enrich_live_parts(self, snapshot) -> None:
+        printers = snapshot.get("printers") if isinstance(snapshot, dict) else None
+        if not isinstance(printers, list):
+            return
+        history = self.history
+        resolve = getattr(history, "resolve_part", None)
+        try:
+            catalog = history.catalog_map() if hasattr(history, "catalog_map") else {}
+        except Exception:
+            catalog = {}
+        for view in printers:
+            if not isinstance(view, dict):
+                continue
+            filename = str(view.get("file") or "")
+            parts = view.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                raw = str(part.get("name") or "")
+                try:
+                    count = int(part.get("count") or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                key = ""
+                if callable(resolve):
+                    try:
+                        key = str(resolve(raw, filename) or "")
+                    except Exception:
+                        key = ""
+                if not key:
+                    try:
+                        key = part_key(raw)
+                    except Exception:
+                        key = raw
+                display = raw
+                code = str(part.get("code") or "")
+                item = catalog.get(key) if isinstance(catalog, dict) else None
+                if isinstance(item, dict):
+                    if str(item.get("name") or "").strip():
+                        display = str(item.get("name") or "").strip()
+                        if display.lower().endswith("(3d)"):
+                            display = display[: -len("(3D)")].strip()
+                    if str(item.get("code") or "").strip():
+                        code = str(item.get("code") or "").strip()
+                if display == raw and not code and key:
+                    try:
+                        fallback_code, fallback_name = split_code_name(raw)
+                    except Exception:
+                        fallback_code, fallback_name = "", raw
+                    if fallback_name.lower().endswith(".stl"):
+                        fallback_name = fallback_name[:-4]
+                    if fallback_name.lower().endswith("(3d)"):
+                        fallback_name = fallback_name[: -len("(3D)")].strip()
+                    display = fallback_name or raw
+                    code = code or fallback_code
+                part["name"] = display or raw
+                part["code"] = code
+                part["count"] = count
 
     def should_shutdown(self, now: float) -> bool:
         return not self.job.running and now - self.last_heartbeat > self.idle_timeout
@@ -896,13 +961,31 @@ class FarmHandler(BaseHTTPRequestHandler):
 
     def _live_parts(self) -> list[dict]:
         parts: dict[str, dict] = {}
+        history = self.app.history
+        resolve = getattr(history, "resolve_part", None)
+        try:
+            catalog = history.catalog_map() if hasattr(history, "catalog_map") else {}
+        except Exception:
+            catalog = {}
         for view in self.app.monitor.snapshot().get("printers") or []:
             if str(view.get("state") or "") not in ("printing", "paused"):
                 continue
+            filename = str(view.get("file") or "")
             for item in view.get("parts") or []:
                 if not isinstance(item, dict):
                     continue
-                key = part_key(item.get("name") or "")
+                raw = str(item.get("name") or "")
+                key = ""
+                if callable(resolve):
+                    try:
+                        key = str(resolve(raw, filename) or "")
+                    except Exception:
+                        key = ""
+                if not key:
+                    try:
+                        key = part_key(raw)
+                    except Exception:
+                        key = ""
                 if not key:
                     continue
                 try:
@@ -913,9 +996,22 @@ class FarmHandler(BaseHTTPRequestHandler):
                     continue
                 entry = parts.setdefault(key, {"key": key, "code": "", "name": "", "count": 0})
                 if not entry["name"]:
-                    code, name = split_code_name(item.get("name") or "")
-                    entry["code"] = code
-                    entry["name"] = name[:-4] if name.lower().endswith(".stl") else name
+                    catalog_item = catalog.get(key) if isinstance(catalog, dict) else None
+                    if isinstance(catalog_item, dict) and (
+                        str(catalog_item.get("name") or "").strip()
+                        or str(catalog_item.get("code") or "").strip()
+                    ):
+                        name = str(catalog_item.get("name") or "").strip()
+                        if name.lower().endswith("(3d)"):
+                            name = name[: -len("(3D)")].strip()
+                        entry["code"] = str(catalog_item.get("code") or "")
+                        entry["name"] = name or key
+                    else:
+                        code, name = split_code_name(item.get("name") or raw)
+                        entry["code"] = code
+                        entry["name"] = name[:-4] if name.lower().endswith(".stl") else name
+                        if entry["name"].lower().endswith("(3d)"):
+                            entry["name"] = entry["name"][: -len("(3D)")].strip()
                 entry["count"] += count
         return [parts[key] for key in sorted(parts)]
 
