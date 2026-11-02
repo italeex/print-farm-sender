@@ -61,6 +61,8 @@ def _parse_xlsx(path: Path) -> dict:
     rows, date_columns = _xlsx_rows(path)
     dates = _dates_from_row(rows.get(2, {}), date_columns)
     if not dates:
+        dates = _dates_from_serials(rows.get(2, {}))
+    if not dates:
         raise ValueError("В файле плана не найдены даты")
     days = [dates[column] for column in sorted(dates)]
     items = []
@@ -86,7 +88,28 @@ def _parse_xlsx(path: Path) -> dict:
                 continue
             items.append({"date": day, "code": code, "name": title, "key": key, "target": target})
     if not plan_rows:
-        raise ValueError("В файле плана не найдены строки «план»")
+        compact = []
+        for number in sorted(rows):
+            if number < 3:
+                continue
+            values = rows[number]
+            text = _text(values.get(0))
+            if not text:
+                continue
+            if "номенклатура" in text.lower():
+                continue
+            code, title = split_code_name(text)
+            key = part_key(text)
+            if not key:
+                continue
+            for column, day in dates.items():
+                target = _quantity(values.get(column))
+                if target <= 0:
+                    continue
+                compact.append({"date": day, "code": code, "name": title, "key": key, "target": target})
+        if not compact:
+            raise ValueError("В файле плана не найдены строки «план»")
+        return _finalize(compact, week_start=days[0], days=days)
     return _finalize(items, week_start=days[0], days=days)
 
 
@@ -232,6 +255,8 @@ def _sheet_title(name) -> str:
 
 
 def _looks_like_plan(rows: dict[int, dict[int, object]]) -> bool:
+    if "в план" in _text(rows.get(1, {}).get(1)).lower():
+        return True
     header = False
     plan = False
     for values in rows.values():
@@ -341,6 +366,21 @@ def _dates_from_row(row: dict[int, object], columns: set[int]) -> dict[int, str]
     dates: dict[int, str] = {}
     for column in sorted(columns):
         if column < 3:
+            continue
+        value = row.get(column)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        serial = int(value)
+        if serial < MIN_SERIAL or serial > MAX_SERIAL:
+            continue
+        dates[column] = (EXCEL_EPOCH + timedelta(days=serial)).isoformat()
+    return dates
+
+
+def _dates_from_serials(row: dict[int, object]) -> dict[int, str]:
+    dates: dict[int, str] = {}
+    for column in sorted(row):
+        if column < 2:
             continue
         value = row.get(column)
         if isinstance(value, bool) or not isinstance(value, (int, float)):

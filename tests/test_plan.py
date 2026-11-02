@@ -143,6 +143,97 @@ def write_plan_xlsx(
     return Path(path)
 
 
+def write_compact_xlsx(
+    path,
+    days,
+    parts,
+    *,
+    sheet_name="График",
+    cover=False,
+    period_total=9999,
+):
+    shared = []
+    index = {}
+
+    def sid(text):
+        if text not in index:
+            index[text] = len(shared)
+            shared.append(text)
+        return index[text]
+
+    def ref(column, row):
+        return f"{LETTERS[column]}{row}"
+
+    rows = [
+        '<row r="1">'
+        f'<c r="A1" t="s"><v>{sid("Номенклатура")}</v></c>'
+        f'<c r="B1" t="s"><v>{sid("в план")}</v></c>'
+        "</row>"
+    ]
+    dates = "".join(
+        f'<c r="{ref(2 + pos, 2)}"><v>{serial(day)}</v></c>' for pos, day in enumerate(days)
+    )
+    rows.append(f'<row r="2">{dates}</row>')
+    row = 3
+    for name, targets in parts:
+        daily = "".join(
+            f'<c r="{ref(2 + pos, row)}"><v>{value}</v></c>'
+            for pos, value in enumerate(targets)
+            if value is not None
+        )
+        rows.append(
+            f'<row r="{row}"><c r="A{row}" t="s"><v>{sid(name)}</v></c>'
+            f'<c r="B{row}"><v>{period_total}</v></c>{daily}</row>'
+        )
+        row += 1
+        facts = "".join(f'<c r="{ref(2 + pos, row)}"><v>99</v></c>' for pos in range(len(days)))
+        rows.append(
+            f'<row r="{row}"><c r="B{row}" t="s"><v>{sid("факт")}</v></c>'
+            f'<c r="C{row}"><v>777</v></c>{facts}</row>'
+        )
+        row += 1
+    strings = "".join(f"<si><t>{escape(text)}</t></si>" for text in shared)
+    shared_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<sst xmlns="{NS}" count="{len(shared)}" uniqueCount="{len(shared)}">{strings}</sst>'
+    )
+    sheets = []
+    if cover:
+        sheets.append(("Сводка", cover_sheet()))
+    sheets.append((sheet_name, worksheet("".join(rows))))
+    sheet_nodes = "".join(
+        f'<sheet name="{escape(name)}" sheetId="{pos}" r:id="rId{pos}"/>'
+        for pos, (name, _) in enumerate(sheets, 1)
+    )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<workbook xmlns="{NS}" xmlns:r="{REL_NS}"><sheets>{sheet_nodes}</sheets></workbook>'
+    )
+    rel_base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    rels = "".join(
+        f'<Relationship Id="rId{pos}" Type="{rel_base}/worksheet" '
+        f'Target="worksheets/sheet{pos}.xml"/>'
+        for pos in range(1, len(sheets) + 1)
+    )
+    rels += f'<Relationship Id="rId{len(sheets) + 1}" Type="{rel_base}/styles" Target="styles.xml"/>'
+    rels += (
+        f'<Relationship Id="rId{len(sheets) + 2}" Type="{rel_base}/sharedStrings" '
+        'Target="sharedStrings.xml"/>'
+    )
+    rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<Relationships xmlns="{PKG_NS}">{rels}</Relationships>'
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", shared_xml)
+        archive.writestr("xl/styles.xml", STYLES)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", rels_xml)
+        for pos, (_, body) in enumerate(sheets, 1):
+            archive.writestr(f"xl/worksheets/sheet{pos}.xml", body)
+    return Path(path)
+
+
 class PartKeyTests(unittest.TestCase):
     def test_strips_prefix_space_and_underscore(self):
         self.assertEqual(part_key("МВСЛ.ГР3.01.42000.01_Крышка.stl"), "ГР3.01.42000.01")
@@ -290,6 +381,72 @@ class XlsxPlanTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 parse_plan_file(self.path)
         self.assertIn("больше", str(caught.exception))
+
+
+class CompactPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.folder / "compact.xlsx"
+
+    def test_parses_compact_layout(self):
+        write_compact_xlsx(
+            self.path,
+            DAYS,
+            [
+                ("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (20, 0, 5)),
+                ("МФСЛ.ГР3.02.10000.01 Корпус (3D)", (None, 7, None)),
+            ],
+            sheet_name="График",
+        )
+        parsed = parse_plan_file(self.path)
+        self.assertEqual(parsed["week_start"], DAYS[0])
+        self.assertEqual(parsed["days"], DAYS)
+        self.assertEqual(
+            [(item["date"], item["key"], item["target"]) for item in parsed["items"]],
+            [
+                (DAYS[0], "ГР3.01.42000.01", 20),
+                (DAYS[1], "ГР3.02.10000.01", 7),
+                (DAYS[2], "ГР3.01.42000.01", 5),
+            ],
+        )
+        self.assertEqual(parsed["items"][0]["code"], "МВСЛ.ГР3.01.42000.01")
+        self.assertEqual(parsed["items"][0]["name"], "Крышка (3D)")
+
+    def test_ignores_period_totals(self):
+        write_compact_xlsx(
+            self.path,
+            DAYS,
+            [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (1, 2, 3))],
+            period_total=9999,
+        )
+        parsed = parse_plan_file(self.path)
+        self.assertEqual(sum(item["target"] for item in parsed["items"]), 6)
+        self.assertNotIn(9999, [item["target"] for item in parsed["items"]])
+
+    def test_selects_compact_sheet_by_marker(self):
+        write_compact_xlsx(
+            self.path,
+            DAYS,
+            [("МВСЛ.ГР3.01.42000.01 Крышка (3D)", (4, None, None))],
+            sheet_name="Лист1",
+            cover=True,
+        )
+        parsed = parse_plan_file(self.path)
+        self.assertEqual(parsed["days"], DAYS)
+        self.assertEqual([item["target"] for item in parsed["items"]], [4])
+
+    def test_rejects_file_with_neither_layout(self):
+        path = self.folder / "junk.xlsx"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("xl/worksheets/sheet1.xml", cover_sheet())
+        with self.assertRaises(ValueError):
+            parse_plan_file(path)
+
+    def test_rejects_empty_compact_plan(self):
+        write_compact_xlsx(self.path, DAYS, [], sheet_name="График")
+        with self.assertRaises(ValueError) as caught:
+            parse_plan_file(self.path)
+        self.assertIn("план", str(caught.exception))
 
 
 class JsonPlanTests(unittest.TestCase):
