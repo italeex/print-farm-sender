@@ -64,6 +64,11 @@ def _parse_xlsx(path: Path) -> dict:
         dates = _dates_from_serials(rows.get(2, {}))
     if not dates:
         raise ValueError("В файле плана не найдены даты")
+    compact_layout = "в план" in _text(rows.get(1, {}).get(1)).lower()
+    if compact_layout:
+        serials = _dates_from_serials(rows.get(2, {}))
+        if serials:
+            dates = {**serials, **dates}
     days = [dates[column] for column in sorted(dates)]
     items = []
     plan_rows = 0
