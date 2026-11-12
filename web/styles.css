@@ -867,6 +867,17 @@ body.compact .grid { gap: 10px; }
 .catalog-ref small { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
 .catalog-ref .muted { color: var(--muted-2); font-style: italic; }
 .catalog-presence { font-family: var(--mono); color: #cfd8e8; white-space: nowrap; }
+.catalog-nozzle { font-family: var(--mono); color: #cfd8e8; white-space: nowrap; cursor: pointer; }
+.catalog-nozzle-val { display: inline-block; min-width: 28px; }
+.catalog-nozzle-badge {
+  display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; border: 1px solid var(--border); color: #a9b6cc; background: #1a2130;
+}
+.catalog-nozzle select {
+  background: #0d1016; border: 1px solid var(--border-soft); color: var(--text);
+  border-radius: 9px; padding: 7px 9px; font: inherit; font-size: 13px;
+}
+.catalog-nozzle select:focus { border-color: #33507f; box-shadow: 0 0 0 3px rgba(91, 140, 255, .14); }
 .catalog-action { text-align: right; white-space: nowrap; }
 .catalog-action .btn { padding: 7px 12px; font-size: 12.5px; }
 .catalog-empty { margin: 0; padding: 22px 12px; text-align: center; font-size: 12.5px; color: var(--muted-2); }

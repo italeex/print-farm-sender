@@ -4284,6 +4284,85 @@ async function saveCatalogNumber(partKey, raw) {
   }
 }
 
+function formatNozzle(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "0.4";
+  return String(Math.round(number * 10) / 10);
+}
+
+function catalogNozzleCell(cell, item) {
+  cell.textContent = "";
+  cell.dataset.nozzleCell = String(item.part_key);
+  cell.title = "Нажмите, чтобы изменить диаметр сопла";
+  const text = document.createElement("span");
+  text.className = "catalog-nozzle-val";
+  text.textContent = formatNozzle(item.nozzle);
+  cell.appendChild(text);
+  const known = item.nozzle_known === true || Number(item.nozzle_known) === 1;
+  const badge = document.createElement("small");
+  badge.className = "catalog-nozzle-badge" + (known ? " auto" : " manual");
+  badge.textContent = known ? "авто" : "вручную";
+  cell.appendChild(badge);
+}
+
+function startCatalogNozzleEdit(cell, item) {
+  if (!cell || cell.querySelector("select")) return;
+  cell.textContent = "";
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "Диаметр сопла " + (item.name || item.part_key));
+  const current = formatNozzle(item.nozzle);
+  const options = ["0.4", "0.6", "0.8"];
+  if (options.indexOf(current) === -1) options.push(current);
+  for (const value of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    if (value === current) option.selected = true;
+    select.appendChild(option);
+  }
+  cell.appendChild(select);
+  select.focus();
+  let done = false;
+  const commit = function (save) {
+    if (done) return;
+    done = true;
+    if (save) saveCatalogNozzle(item.part_key, select.value);
+    else renderCatalog();
+  };
+  select.addEventListener("change", function () {
+    commit(true);
+  });
+  select.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      commit(false);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      commit(true);
+    }
+  });
+  select.addEventListener("blur", function () {
+    commit(false);
+  });
+}
+
+async function saveCatalogNozzle(partKey, raw) {
+  const nozzle = Number(String(raw === null || raw === undefined ? "" : raw).trim());
+  if (!Number.isFinite(nozzle) || nozzle < 0.1 || nozzle > 1.2) {
+    toast("Сопло должно быть от 0.1 до 1.2.", "error");
+    renderCatalog();
+    return;
+  }
+  try {
+    await requestJSON("/api/catalog", { method: "POST", body: { part_key: partKey, nozzle: nozzle } });
+    toast("Сопло сохранено.");
+    await loadCatalog();
+  } catch (error) {
+    toast(errorText(error, "Не удалось сохранить сопло."), "error");
+    renderCatalog();
+  }
+}
+
 async function openCatalogFile(partKey) {
   if (!partKey || browseBusy) return;
   browseBusy = true;
@@ -4373,6 +4452,10 @@ function renderCatalog() {
       refCell.appendChild(missing);
     }
     row.appendChild(refCell);
+    const nozzleCell = document.createElement("td");
+    nozzleCell.className = "catalog-nozzle";
+    catalogNozzleCell(nozzleCell, item);
+    row.appendChild(nozzleCell);
     const presence = catalogPresence(item.part_key);
     const printersCell = document.createElement("td");
     printersCell.className = "catalog-presence";
@@ -5286,6 +5369,11 @@ function init() {
       }
       const fileButton = target.closest("[data-catalog-file]");
       if (fileButton) openCatalogFile(fileButton.getAttribute("data-catalog-file") || "");
+      const nozzleCell = target.closest("[data-nozzle-cell]");
+      if (nozzleCell && !target.closest("select")) {
+        const item = catalogItem(nozzleCell.getAttribute("data-nozzle-cell") || "");
+        if (item) startCatalogNozzleEdit(nozzleCell, item);
+      }
     });
     catalogBodyEl.addEventListener("dblclick", function (event) {
       const target = event.target instanceof Element ? event.target : null;
