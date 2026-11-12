@@ -1135,7 +1135,7 @@ class HistoryStore:
                     elif parsed_nozzle is not None:
                         final_nozzle, known = float(parsed_nozzle), 0
                     elif file_path is not None:
-                        final_nozzle, known = current_nozzle, 0
+                        final_nozzle, known = 0.4, 0
                     else:
                         final_nozzle, known = current_nozzle, current_known
                     self._conn.execute(
