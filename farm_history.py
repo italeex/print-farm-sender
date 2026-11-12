@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS parts_catalog (
     file_path TEXT,
     file_size INTEGER,
     file_mtime REAL,
+    nozzle REAL NOT NULL DEFAULT 0.4,
+    nozzle_known INTEGER NOT NULL DEFAULT 0,
     quantity INTEGER NOT NULL DEFAULT 0,
     updated_at REAL
 );
@@ -102,6 +104,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS file_registry (
     printer_key TEXT NOT NULL,
     name TEXT NOT NULL,
+    path TEXT,
     size INTEGER NOT NULL DEFAULT 0,
     modified REAL NOT NULL DEFAULT 0,
     seen_at REAL NOT NULL DEFAULT 0,
@@ -905,7 +908,7 @@ class HistoryStore:
             self._conn.commit()
             rows = self._conn.execute(
                 "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
-                "quantity FROM parts_catalog "
+                "nozzle, nozzle_known, quantity FROM parts_catalog "
                 "ORDER BY CASE WHEN number IS NULL THEN 1 ELSE 0 END, number, part_key"
             ).fetchall()
         return [self._catalog_row(row) for row in rows]
@@ -916,7 +919,7 @@ class HistoryStore:
             try:
                 rows = self._conn.execute(
                     "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
-                    "quantity FROM parts_catalog"
+                    "nozzle, nozzle_known, quantity FROM parts_catalog"
                 ).fetchall()
             except sqlite3.Error:
                 return {}
@@ -1009,7 +1012,7 @@ class HistoryStore:
             return str(mapping[file_number]["part_key"])
         return key or ""
 
-    def set_catalog(self, part_key, number=None, file_path=None) -> dict:
+    def set_catalog(self, part_key, number=None, file_path=None, nozzle=None) -> dict:
         key = str(part_key or "").strip()
         if not key:
             raise ValueError("Не указан part_key")
@@ -1018,10 +1021,20 @@ class HistoryStore:
                 raise ValueError("Номер должен быть целым числом больше нуля")
             if number <= 0:
                 raise ValueError("Номер должен быть целым числом больше нуля")
+        parsed_nozzle = None
+        if nozzle is not None:
+            try:
+                parsed_nozzle = float(nozzle)
+            except (TypeError, ValueError):
+                raise ValueError("Сопло должно быть числом от 0.1 до 1.2") from None
+            if not 0.1 <= parsed_nozzle <= 1.2:
+                raise ValueError("Сопло должно быть числом от 0.1 до 1.2")
+            parsed_nozzle = round(parsed_nozzle, 1)
         file_value = None
         file_size = None
         file_mtime = None
         quantity = None
+        detected = None
         if file_path is not None:
             text = str(file_path).strip()
             if text:
@@ -1036,6 +1049,15 @@ class HistoryStore:
                 file_size = stat.st_size
                 file_mtime = stat.st_mtime
                 quantity = _plate_quantity_for_file(target)
+                try:
+                    from farm_files import detect_nozzle as _detect_nozzle
+                except Exception:
+                    _detect_nozzle = None
+                if _detect_nozzle is not None:
+                    try:
+                        detected = _detect_nozzle(target)
+                    except Exception:
+                        detected = None
             else:
                 quantity = 0
         with self._lock:
@@ -1052,7 +1074,7 @@ class HistoryStore:
                     raise ValueError(f"Номер {number} уже занят")
             row = self._conn.execute(
                 "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
-                "quantity FROM parts_catalog WHERE part_key = ?",
+                "nozzle, nozzle_known, quantity FROM parts_catalog WHERE part_key = ?",
                 (key,),
             ).fetchone()
             try:
@@ -1061,9 +1083,16 @@ class HistoryStore:
                     assigned = number
                     if assigned is None:
                         assigned = self._next_number_locked()
+                    if detected is not None:
+                        final_nozzle, known = float(detected), 1
+                    elif parsed_nozzle is not None:
+                        final_nozzle, known = float(parsed_nozzle), 0
+                    else:
+                        final_nozzle, known = 0.4, 0
                     self._conn.execute(
                         "INSERT INTO parts_catalog (part_key, number, code, name, file_path, file_size, "
-                        "file_mtime, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "file_mtime, nozzle, nozzle_known, quantity, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             key,
                             assigned,
@@ -1072,6 +1101,8 @@ class HistoryStore:
                             file_value,
                             file_size,
                             file_mtime,
+                            final_nozzle,
+                            known,
                             quantity if quantity is not None else 0,
                             self._clock(),
                         ),
@@ -1091,10 +1122,27 @@ class HistoryStore:
                             quantity = int(row["quantity"])
                         except (KeyError, TypeError, ValueError):
                             quantity = 0
+                    try:
+                        current_nozzle = float(row["nozzle"]) if row["nozzle"] is not None else 0.4
+                    except (TypeError, ValueError, KeyError):
+                        current_nozzle = 0.4
+                    try:
+                        current_known = int(row["nozzle_known"] or 0)
+                    except (TypeError, ValueError, KeyError):
+                        current_known = 0
+                    if detected is not None:
+                        final_nozzle, known = float(detected), 1
+                    elif parsed_nozzle is not None:
+                        final_nozzle, known = float(parsed_nozzle), current_known
+                    elif file_path is not None:
+                        final_nozzle, known = current_nozzle, 0
+                    else:
+                        final_nozzle, known = current_nozzle, current_known
                     self._conn.execute(
                         "UPDATE parts_catalog SET number = ?, file_path = ?, file_size = ?, "
-                        "file_mtime = ?, quantity = ?, updated_at = ? WHERE part_key = ?",
-                        (assigned, file_value, file_size, file_mtime, quantity or 0, self._clock(), key),
+                        "file_mtime = ?, nozzle = ?, nozzle_known = ?, quantity = ?, "
+                        "updated_at = ? WHERE part_key = ?",
+                        (assigned, file_value, file_size, file_mtime, final_nozzle, known, quantity or 0, self._clock(), key),
                     )
                 self._conn.commit()
             except sqlite3.IntegrityError:
@@ -1102,7 +1150,7 @@ class HistoryStore:
                 raise ValueError(f"Номер {assigned} уже занят") from None
             fresh = self._conn.execute(
                 "SELECT part_key, number, code, name, file_path, file_size, file_mtime, "
-                "quantity FROM parts_catalog WHERE part_key = ?",
+                "nozzle, nozzle_known, quantity FROM parts_catalog WHERE part_key = ?",
                 (key,),
             ).fetchone()
         return self._catalog_row(fresh)
@@ -1125,6 +1173,14 @@ class HistoryStore:
             quantity = int(row["quantity"]) if row["quantity"] is not None else 0
         except (KeyError, TypeError, ValueError):
             quantity = 0
+        try:
+            nozzle = float(row["nozzle"]) if row["nozzle"] is not None else 0.4
+        except (KeyError, TypeError, ValueError):
+            nozzle = 0.4
+        try:
+            known = int(row["nozzle_known"] or 0)
+        except (KeyError, TypeError, ValueError):
+            known = 0
         return {
             "part_key": str(row["part_key"]),
             "number": number,
@@ -1133,6 +1189,8 @@ class HistoryStore:
             "file_path": str(row["file_path"]) if row["file_path"] else None,
             "file_size": size,
             "file_mtime": mtime,
+            "nozzle": nozzle,
+            "nozzle_known": 1 if known else 0,
             "quantity": max(quantity, 0),
         }
 
@@ -1141,6 +1199,7 @@ class HistoryStore:
             "CREATE TABLE IF NOT EXISTS parts_catalog ("
             "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
             "file_path TEXT, file_size INTEGER, file_mtime REAL, "
+            "nozzle REAL NOT NULL DEFAULT 0.4, nozzle_known INTEGER NOT NULL DEFAULT 0, "
             "quantity INTEGER NOT NULL DEFAULT 0, updated_at REAL)"
         )
         catalog_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(parts_catalog)")}
@@ -1151,6 +1210,8 @@ class HistoryStore:
             ("file_path", "TEXT"),
             ("file_size", "INTEGER"),
             ("file_mtime", "REAL"),
+            ("nozzle", "REAL NOT NULL DEFAULT 0.4"),
+            ("nozzle_known", "INTEGER NOT NULL DEFAULT 0"),
             ("quantity", "INTEGER NOT NULL DEFAULT 0"),
             ("updated_at", "REAL"),
         ):
@@ -1162,10 +1223,19 @@ class HistoryStore:
         )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS file_registry ("
-            "printer_key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, "
+            "printer_key TEXT NOT NULL, name TEXT NOT NULL, path TEXT, size INTEGER NOT NULL DEFAULT 0, "
             "modified REAL NOT NULL DEFAULT 0, seen_at REAL NOT NULL DEFAULT 0, "
             "PRIMARY KEY (printer_key, name))"
         )
+        try:
+            _registry_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(file_registry)")}
+        except sqlite3.Error:
+            _registry_columns = set()
+        if "path" not in _registry_columns:
+            try:
+                self._conn.execute("ALTER TABLE file_registry ADD COLUMN path TEXT")
+            except sqlite3.Error:
+                pass
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS printer_files ("
             "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "
@@ -1365,9 +1435,14 @@ class HistoryStore:
     def registry(self) -> dict:
         with self._lock:
             self._ensure_files_schema_locked()
-            rows = self._conn.execute(
-                "SELECT printer_key, name, size, modified, seen_at FROM file_registry"
-            ).fetchall()
+            try:
+                rows = self._conn.execute(
+                    "SELECT printer_key, name, path, size, modified, seen_at FROM file_registry"
+                ).fetchall()
+            except sqlite3.Error:
+                rows = self._conn.execute(
+                    "SELECT printer_key, name, size, modified, seen_at FROM file_registry"
+                ).fetchall()
         result: dict = {}
         for row in rows:
             try:
@@ -1382,8 +1457,13 @@ class HistoryStore:
                 seen_at = float(row["seen_at"])
             except (TypeError, ValueError):
                 seen_at = 0.0
+            try:
+                stored_path = str(row["path"]) if row["path"] else ""
+            except (KeyError, IndexError, TypeError, ValueError):
+                stored_path = ""
             result.setdefault(str(row["printer_key"]), {})[str(row["name"])] = {
                 "name": str(row["name"]),
+                "path": stored_path,
                 "size": size,
                 "modified": modified,
                 "seen_at": seen_at,
@@ -1401,6 +1481,7 @@ class HistoryStore:
             name = str(entry.get("name") or "").strip()
             if not name:
                 continue
+            stored_path = str(entry.get("path") or "").strip()
             try:
                 size = int(entry.get("size") or 0)
             except (TypeError, ValueError):
@@ -1413,22 +1494,22 @@ class HistoryStore:
                 seen_at = float(entry.get("seen_at") or self._clock())
             except (TypeError, ValueError):
                 seen_at = float(self._clock())
-            items.append((name, size, modified, seen_at))
+            items.append((name, stored_path, size, modified, seen_at))
         with self._lock:
             self._ensure_files_schema_locked()
             self._conn.execute("DELETE FROM file_registry WHERE printer_key = ?", (key,))
             self._conn.executemany(
-                "INSERT INTO file_registry (printer_key, name, size, modified, seen_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(key, name, size, modified, seen_at) for name, size, modified, seen_at in items],
+                "INSERT INTO file_registry (printer_key, name, path, size, modified, seen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(key, name, stored_path, size, modified, seen_at) for name, stored_path, size, modified, seen_at in items],
             )
             self._conn.commit()
         return [
-            {"name": name, "size": size, "modified": modified, "seen_at": seen_at}
-            for name, size, modified, seen_at in items
+            {"name": name, "path": stored_path, "size": size, "modified": modified, "seen_at": seen_at}
+            for name, stored_path, size, modified, seen_at in items
         ]
 
-    def file_registry(self, printer_key, name, size, modified, seen_at) -> dict:
+    def file_registry(self, printer_key, name, size, modified, seen_at, path="") -> dict:
         key = str(printer_key or "").strip()
         item = str(name or "").strip()
         if not key or not item:
@@ -1448,14 +1529,14 @@ class HistoryStore:
         with self._lock:
             self._ensure_files_schema_locked()
             self._conn.execute(
-                "INSERT INTO file_registry (printer_key, name, size, modified, seen_at) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO file_registry (printer_key, name, path, size, modified, seen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(printer_key, name) DO UPDATE SET "
-                "size = excluded.size, modified = excluded.modified, seen_at = excluded.seen_at",
-                (key, item, amount, moment, stamp),
+                "path = excluded.path, size = excluded.size, modified = excluded.modified, seen_at = excluded.seen_at",
+                (key, item, str(path or "").strip(), amount, moment, stamp),
             )
             self._conn.commit()
-        return {"name": item, "size": amount, "modified": moment, "seen_at": stamp}
+        return {"name": item, "path": str(path or "").strip(), "size": amount, "modified": moment, "seen_at": stamp}
 
     def printer_mode(self, printer_key) -> str:
         key = str(printer_key or "").strip()
@@ -1705,10 +1786,19 @@ class HistoryStore:
     def _ensure_files_schema_locked(self) -> None:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS file_registry ("
-            "printer_key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, "
+            "printer_key TEXT NOT NULL, name TEXT NOT NULL, path TEXT, size INTEGER NOT NULL DEFAULT 0, "
             "modified REAL NOT NULL DEFAULT 0, seen_at REAL NOT NULL DEFAULT 0, "
             "PRIMARY KEY (printer_key, name))"
         )
+        try:
+            _files_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(file_registry)")}
+        except sqlite3.Error:
+            _files_columns = set()
+        if "path" not in _files_columns:
+            try:
+                self._conn.execute("ALTER TABLE file_registry ADD COLUMN path TEXT")
+            except sqlite3.Error:
+                pass
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS printer_files ("
             "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "
@@ -1905,6 +1995,7 @@ class HistoryStore:
             "CREATE TABLE IF NOT EXISTS parts_catalog ("
             "part_key TEXT PRIMARY KEY, number INTEGER, code TEXT, name TEXT, "
             "file_path TEXT, file_size INTEGER, file_mtime REAL, "
+            "nozzle REAL NOT NULL DEFAULT 0.4, nozzle_known INTEGER NOT NULL DEFAULT 0, "
             "quantity INTEGER NOT NULL DEFAULT 0, updated_at REAL)"
         )
         catalog_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(parts_catalog)")}
@@ -1915,6 +2006,8 @@ class HistoryStore:
             ("file_path", "TEXT"),
             ("file_size", "INTEGER"),
             ("file_mtime", "REAL"),
+            ("nozzle", "REAL NOT NULL DEFAULT 0.4"),
+            ("nozzle_known", "INTEGER NOT NULL DEFAULT 0"),
             ("quantity", "INTEGER NOT NULL DEFAULT 0"),
             ("updated_at", "REAL"),
         ):
@@ -1926,10 +2019,19 @@ class HistoryStore:
         )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS file_registry ("
-            "printer_key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, "
+            "printer_key TEXT NOT NULL, name TEXT NOT NULL, path TEXT, size INTEGER NOT NULL DEFAULT 0, "
             "modified REAL NOT NULL DEFAULT 0, seen_at REAL NOT NULL DEFAULT 0, "
             "PRIMARY KEY (printer_key, name))"
         )
+        try:
+            _registry_now = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(file_registry)")}
+        except sqlite3.Error:
+            _registry_now = set()
+        if "path" not in _registry_now:
+            try:
+                self._conn.execute("ALTER TABLE file_registry ADD COLUMN path TEXT")
+            except sqlite3.Error:
+                pass
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS printer_files ("
             "printer_key TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'folder', "

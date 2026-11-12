@@ -692,8 +692,19 @@ class FarmHandler(BaseHTTPRequestHandler):
         if file_path is not None and not isinstance(file_path, str):
             self._send_error(400, "Путь к файлу должен быть строкой")
             return
+        nozzle = payload.get("nozzle")
+        if nozzle is not None:
+            try:
+                nozzle_value = float(nozzle)
+            except (TypeError, ValueError):
+                self._send_error(400, "Сопло должно быть числом от 0.1 до 1.2")
+                return
+            if not 0.1 <= nozzle_value <= 1.2:
+                self._send_error(400, "Сопло должно быть числом от 0.1 до 1.2")
+                return
+            nozzle = round(nozzle_value, 1)
         try:
-            item = self.app.history.set_catalog(part_key, number=number, file_path=file_path)
+            item = self.app.history.set_catalog(part_key, number=number, file_path=file_path, nozzle=nozzle)
         except ValueError as exc:
             self._send_error(400, str(exc) or "Некорректные данные каталога")
             return
@@ -728,12 +739,8 @@ class FarmHandler(BaseHTTPRequestHandler):
         if not current or not remote:
             return False
         base = current.replace("\\", "/").split("/")[-1]
-        return (
-            base == remote
-            or current == remote
-            or base == FARM_PREFIX + remote
-            or current == FARM_DIR + "/" + remote
-        )
+        want = remote.replace("\\", "/").split("/")[-1]
+        return base == want
 
     def _catalog_statuses(self) -> dict:
         catalog = self.app.history.catalog_map()
@@ -744,6 +751,13 @@ class FarmHandler(BaseHTTPRequestHandler):
             key = printer.key
             current = str((views.get(key) or {}).get("file") or "")
             files = stored.get(key, {})
+            by_base = {}
+            for entry in files.values():
+                if not isinstance(entry, dict):
+                    continue
+                base = str(entry.get("name") or "")
+                if base and base not in by_base:
+                    by_base[base] = entry
             per = {}
             for part_key, item in catalog.items():
                 number = item.get("number") if isinstance(item, dict) else None
@@ -756,7 +770,7 @@ class FarmHandler(BaseHTTPRequestHandler):
                 if self._is_printing_remote(current, remote):
                     per[part_key] = "printing"
                     continue
-                entry = files.get(remote)
+                entry = by_base.get(remote)
                 if entry is None:
                     per[part_key] = "missing"
                     continue
@@ -826,6 +840,7 @@ class FarmHandler(BaseHTTPRequestHandler):
             entries = [
                 {
                     "name": str(item.get("name") or ""),
+                    "path": str(item.get("path") or ""),
                     "size": item.get("size") or 0,
                     "modified": item.get("modified") or 0.0,
                     "seen_at": now,
@@ -915,8 +930,14 @@ class FarmHandler(BaseHTTPRequestHandler):
         if not exists:
             return {"printer": key, "part": part, "ok": False, "error": f"Файл не найден: {local}"}
         mode = self.app.history.printer_mode(key)
+        nozzle = 0.4
+        if isinstance(item, dict) and item.get("nozzle") is not None:
+            try:
+                nozzle = float(item.get("nozzle"))
+            except (TypeError, ValueError):
+                nozzle = 0.4
         try:
-            used = upload_to_farm(printer, target, remote, mode)
+            used = upload_to_farm(printer, target, remote, mode, nozzle)
         except FarmFileError as exc:
             return {"printer": key, "part": part, "ok": False, "error": str(exc)}
         except Exception as exc:
@@ -934,26 +955,46 @@ class FarmHandler(BaseHTTPRequestHandler):
         now = time.time()
         with FILES_LOCK:
             self.app.history.printer_files(key, used, now)
-            self.app.history.file_registry(key, remote, size, modified, now)
+            try:
+                from farm_files import format_nozzle as _format_nozzle
+                stored_path = f"{FARM_DIR}/{_format_nozzle(nozzle)}/{remote}"
+            except Exception:
+                stored_path = f"{FARM_DIR}/{remote}"
+            self.app.history.file_registry(key, remote, size, modified, now, stored_path)
         return {"printer": key, "part": part, "ok": True}
 
     def _delete_one(self, printer, key: str, part: str, remote: str) -> dict:
         mode = self.app.history.printer_mode(key)
+        stored_path = ""
+        try:
+            entry = (self.app.history.registry().get(key, {}) or {}).get(remote)
+            if isinstance(entry, dict):
+                stored_path = str(entry.get("path") or "")
+        except Exception:
+            stored_path = ""
+        candidates: list[str] = []
+        if stored_path:
+            candidates.append(stored_path)
+        folder_guess = f"{FARM_DIR}/{remote}"
+        if folder_guess not in candidates:
+            candidates.append(folder_guess)
+        prefix_guess = f"{FARM_PREFIX}{remote}"
+        if prefix_guess not in candidates:
+            candidates.append(prefix_guess)
         used = None
-        for candidate in (mode, "prefix" if mode == "folder" else "folder"):
+        last_error = ""
+        for candidate in candidates:
+            candidate_mode = "prefix" if candidate.startswith(FARM_PREFIX) else "folder"
             try:
-                deleted = delete_from_farm(printer, [remote], candidate)
+                deleted = delete_from_farm(printer, [candidate], candidate_mode)
             except FarmFileError as exc:
-                return {"printer": key, "part": part, "ok": False, "error": str(exc)}
+                last_error = str(exc)
+                continue
             except Exception as exc:
-                return {
-                    "printer": key,
-                    "part": part,
-                    "ok": False,
-                    "error": str(exc) or f"Не удалось удалить файл {remote}",
-                }
+                last_error = str(exc) or f"Не удалось удалить файл {remote}"
+                continue
             if deleted:
-                used = candidate
+                used = candidate_mode
                 break
         now = time.time()
         with FILES_LOCK:
@@ -962,6 +1003,8 @@ class FarmHandler(BaseHTTPRequestHandler):
             self.app.history.set_registry(key, list(current.values()))
             self.app.history.printer_files(key, used or mode, now)
         if used is None:
+            if last_error:
+                return {"printer": key, "part": part, "ok": False, "error": last_error}
             return {
                 "printer": key,
                 "part": part,

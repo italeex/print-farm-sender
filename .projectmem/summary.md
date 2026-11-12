@@ -1,6 +1,6 @@
 # projectmem - printer-farm-sender
 
-_Last updated: 2026-10-29_
+_Last updated: 2026-11-02_
 
 ## Project purpose
 Десктопное приложение (Python 3.13 + Tkinter, стандартная библиотека + `requests`) для одновременной рассылки одного или нескольких `.gcode` файлов на другие принтеры Creality…
@@ -14,16 +14,16 @@ _Last updated: 2026-10-29_
 - Refactor: refactor: move plan calendar into a tab [web/app.js]
 
 ## Notes
-- New feature: feat: count in-progress parts in plan facts [farm_history.py]
-- New feature: feat: add QC shift report to history store [farm_history.py]
-- New feature: feat: expose QC report endpoints [farm_server.py]
-- New feature: feat: add tab navigation shell [web/app.js]
-- New feature: feat: show completed and in-progress plan progress [web/app.js]
-- New feature: feat: add start-now recommendation block [web/app.js]
-- New feature: feat: add QC report dialog [web/app.js]
-- New feature: feat: plan progress in positions not pieces [web/app.js]
-- New feature: feat: add part catalog with numbers [farm_history.py]
 - New feature: feat: add farm file operations [farm_files.py]
+- New feature: feat: expose catalog and file operations [farm_history.py]
+- New feature: feat: add files catalog table [web/app.js]
+- New feature: feat: add file matrix with bulk actions [web/app.js]
+- New feature: feat: add shift scheduling engine [farm_schedule.py]
+- New feature: feat: add shift scheduling tab [web/app.js]
+- New feature: feat: expose shift schedule API [farm_history.py]
+- New feature: feat(catalog): per-plate quantity from gcode object markers [farm_history.py]
+- New feature: feat: part mapping by designation across dashboard [farm_history.py]
+- New feature: feat: support compact Excel plan layout with serial dates [farm_plan.py]
 
 ## Key files
 - `.gitignore`

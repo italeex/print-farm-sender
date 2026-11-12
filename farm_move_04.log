@@ -1,0 +1,56 @@
+15:51:00 START move
+15:51:02 F008 155 MOVE FAIL N16.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:10 F008 158 MOVE FAIL N27.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:15 F008 103 moved=33 failed=0 root_left=0 in_0.4=34
+15:51:15 F008 175 MOVE FAIL N26.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:17 F008 158 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:17 F008 158 DONE moved=33 failed=1
+15:51:19 F008 175 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:20 F008 155 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:20 F008 155 DONE moved=33 failed=1
+15:51:20 F008 175 DONE moved=33 failed=1
+15:51:20 F008 103 DONE moved=33 failed=0
+15:51:25 F008 150 MOVE FAIL N23.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:26 F008 100 MOVE FAIL N25.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:29 F008 150 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:29 F008 244 MOVE FAIL N26.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:30 F008 100 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:30 F008 100 DONE moved=33 failed=1
+15:51:30 F008 150 DONE moved=33 failed=1
+15:51:32 F008 244 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:34 F008 170 MOVE FAIL N26.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:37 F008 239 MOVE FAIL N26.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:38 F008 170 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:38 F008 170 DONE moved=33 failed=1
+15:51:38 F008 244 DONE moved=33 failed=1
+15:51:40 F008 172 MOVE FAIL N25.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:46 F008 239 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:46 F008 239 DONE moved=33 failed=1
+15:51:48 F008 168 moved=34 failed=0 root_left=0 in_0.4=34
+15:51:51 F008 172 moved=33 failed=1 root_left=1 in_0.4=33
+15:51:51 F008 172 DONE moved=33 failed=1
+15:51:51 F008 168 DONE moved=34 failed=0
+15:51:52 F008 186 MOVE FAIL N26.gcode 403 {"error": {"code": 403, "message": "File currently in use", "traceback": "Traceb
+15:51:53 F008 176 CREATE FARM/0.4 HTTPConnectionPool(host='192.168.7.176', port=7125): Read timed out. (read timeout=15)
+15:52:03 F008 167 CREATE FARM/0.4 HTTPConnectionPool(host='192.168.7.167', port=7125): Read timed out. (read timeout=15)
+15:52:04 F008 186 moved=33 failed=1 root_left=1 in_0.4=33
+15:52:06 F008 143 CREATE FARM/0.4 HTTPConnectionPool(host='192.168.7.143', port=7125): Read timed out. (read timeout=15)
+15:52:08 F008 176 CREATE FARM/0.8 HTTPConnectionPool(host='192.168.7.176', port=7125): Read timed out. (read timeout=15)
+15:52:14 A7 moved=30 failed=0 root_left=0 in_0.4=30
+15:52:18 F008 167 CREATE FARM/0.8 HTTPConnectionPool(host='192.168.7.167', port=7125): Read timed out. (read timeout=15)
+15:52:21 F008 143 CREATE FARM/0.8 HTTPConnectionPool(host='192.168.7.143', port=7125): Read timed out. (read timeout=15)
+15:52:23 F008 176 ERR HTTPConnectionPool(host='192.168.7.176', port=7125): Read timed out. (read timeout=15)
+15:52:23 F008 176 DONE moved=0 failed=0
+15:52:23 F008 186 DONE moved=33 failed=1
+15:52:29 K2Plus-30CB CREATE FARM/0.4 HTTPConnectionPool(host='192.168.7.247', port=7125): Read timed out. (read timeout=15)
+15:52:33 F008 167 ERR HTTPConnectionPool(host='192.168.7.167', port=7125): Read timed out. (read timeout=15)
+15:52:33 F008 167 DONE moved=0 failed=0
+15:52:34 A-4 moved=0 failed=0 root_left=0 in_0.4=0
+15:52:36 F008 143 ERR HTTPConnectionPool(host='192.168.7.143', port=7125): Read timed out. (read timeout=15)
+15:52:36 F008 143 DONE moved=0 failed=0
+15:52:36 A7 DONE moved=30 failed=0
+15:52:44 K2Plus-30CB CREATE FARM/0.8 HTTPConnectionPool(host='192.168.7.247', port=7125): Read timed out. (read timeout=15)
+15:52:59 K2Plus-30CB ERR HTTPConnectionPool(host='192.168.7.247', port=7125): Read timed out. (read timeout=15)
+15:52:59 K2Plus-30CB DONE moved=0 failed=0
+15:52:59 A-4 DONE moved=0 failed=0
+15:52:59 FINISH move

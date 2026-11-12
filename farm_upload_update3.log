@@ -1,0 +1,72 @@
+15:07:15 START update 9,23,24
+15:07:34 F008 175 OK N9.gcode 45399836
+15:07:36 F008 103 OK N9.gcode 45399836
+15:07:38 F008 158 OK N9.gcode 45399836
+15:07:38 F008 155 OK N9.gcode 45399836
+15:07:42 F008 103 FAIL N23.gcode Не удалось загрузить файл N23.gcode: HTTP 403
+15:07:47 F008 175 OK N23.gcode 28038971
+15:07:50 F008 158 OK N23.gcode 28038971
+15:07:51 F008 155 OK N23.gcode 28038971
+15:07:54 F008 103 OK N24.gcode 18877279
+15:07:56 F008 155 FAIL N24.gcode Не удалось загрузить файл N24.gcode: HTTP 403
+15:08:00 F008 175 OK N24.gcode 18877279
+15:08:01 F008 158 OK N24.gcode 18877279
+15:08:01 F008 158 DONE ok=3 skip=0 fail=0
+15:08:01 F008 155 DONE ok=2 skip=0 fail=1
+15:08:01 F008 175 DONE ok=3 skip=0 fail=0
+15:08:01 F008 103 DONE ok=2 skip=0 fail=1
+15:08:14 F008 100 OK N9.gcode 45399836
+15:08:17 F008 150 OK N9.gcode 45399836
+15:08:25 F008 244 OK N9.gcode 45399836
+15:08:27 F008 100 OK N23.gcode 28038971
+15:08:28 F008 170 OK N9.gcode 45399836
+15:08:33 F008 150 OK N23.gcode 28038971
+15:08:37 F008 100 OK N24.gcode 18877279
+15:08:37 F008 100 DONE ok=3 skip=0 fail=0
+15:08:42 F008 244 OK N23.gcode 28038971
+15:08:44 F008 170 OK N23.gcode 28038971
+15:08:45 F008 150 OK N24.gcode 18877279
+15:08:45 F008 150 DONE ok=3 skip=0 fail=0
+15:08:54 F008 244 OK N24.gcode 18877279
+15:08:56 F008 170 OK N24.gcode 18877279
+15:08:56 F008 170 DONE ok=3 skip=0 fail=0
+15:08:56 F008 244 DONE ok=3 skip=0 fail=0
+15:08:58 F008 239 OK N9.gcode 45399836
+15:09:09 F008 239 OK N23.gcode 28038971
+15:09:10 F008 172 OK N9.gcode 45399836
+15:09:13 F008 176 OK N9.gcode 45399836
+15:09:18 F008 239 OK N24.gcode 18877279
+15:09:18 F008 239 DONE ok=3 skip=0 fail=0
+15:09:24 F008 176 OK N23.gcode 28038971
+15:09:25 F008 168 OK N9.gcode 45399836
+15:09:27 F008 172 OK N23.gcode 28038971
+15:09:32 F008 176 OK N24.gcode 18877279
+15:09:37 F008 172 OK N24.gcode 18877279
+15:09:37 F008 172 DONE ok=3 skip=0 fail=0
+15:09:42 F008 186 OK N9.gcode 45399836
+15:09:42 F008 167 LIST FAIL Не удалось получить список файлов: HTTPConnectionPool(host='192.168.7.167', port=7125): Read timed out. (read timeout=10)
+15:09:47 F008 168 OK N23.gcode 28038971
+15:09:49 F008 186 FAIL N23.gcode Не удалось загрузить файл N23.gcode: HTTP 403
+15:09:58 F008 186 OK N24.gcode 18877279
+15:10:03 F008 167 FAIL N9.gcode Не удалось загрузить файл N9.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+15:10:07 F008 168 OK N24.gcode 18877279
+15:10:07 F008 168 DONE ok=3 skip=0 fail=0
+15:10:07 F008 176 DONE ok=3 skip=0 fail=0
+15:10:07 F008 186 DONE ok=2 skip=0 fail=1
+15:10:08 A7 LIST FAIL Не удалось получить список файлов: HTTPConnectionPool(host='192.168.7.181', port=7125): Read timed out. (read timeout=10)
+15:10:25 F008 167 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+15:10:29 A7 FAIL N9.gcode Не удалось загрузить файл N9.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+15:10:46 F008 167 FAIL N24.gcode Не удалось загрузить файл N24.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+15:10:46 F008 167 DONE ok=0 skip=0 fail=3
+15:10:50 A7 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+15:11:11 A7 FAIL N24.gcode Не удалось загрузить файл N24.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+15:12:40 F008 143 OK N9.gcode 45399836
+15:13:39 K2Plus-30CB OK N9.gcode 45399836
+15:14:35 K2Plus-30CB OK N23.gcode 28038971
+15:15:32 F008 143 OK N23.gcode 28038971
+15:16:15 F008 143 FAIL N24.gcode Не удалось загрузить файл N24.gcode: HTTP 403
+15:16:15 F008 143 DONE ok=2 skip=0 fail=1
+15:16:15 A7 DONE ok=0 skip=0 fail=3
+15:16:43 K2Plus-30CB OK N24.gcode 18877279
+15:16:43 K2Plus-30CB DONE ok=3 skip=0 fail=0
+15:16:43 FINISH update

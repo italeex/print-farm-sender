@@ -40,18 +40,49 @@ class FakeFileServer:
                 fake.requests.append((self.command, raw.path, raw.query))
                 return raw.path, raw.query
 
+            def _is_broken(self, requested):
+                if not requested or requested == "FARM":
+                    return bool(fake.folder_broken)
+                if not requested.startswith("FARM/") or ".." in requested:
+                    return True
+                return bool(fake.folder_broken)
+
             def do_GET(self):
                 path, query = self._path()
                 if path == "/server/files/directory":
-                    if fake.folder_broken:
+                    requested = ""
+                    for part in query.split("&"):
+                        if part.startswith("path="):
+                            requested = unquote(part[len("path="):])
+                    if requested.startswith("gcodes/"):
+                        requested = requested[len("gcodes/"):]
+                    if self._is_broken(requested):
                         self._send_json({"error": "Directory does not exist"}, status=400)
                         return
-                    files = [
-                        {"filename": key.split("/", 1)[1], "size": len(data), "modified": 100.0}
-                        for key, data in fake.store.items()
-                        if key.startswith("FARM/")
-                    ]
-                    self._send_json({"result": {"dirs": [], "files": files, "root_info": {}}})
+                    base = "FARM" if not requested or requested == "FARM" else requested
+                    prefix = base + "/"
+                    files = []
+                    subdirs = set()
+                    for key, data in fake.store.items():
+                        if not key.startswith(prefix):
+                            continue
+                        rest = key[len(prefix):]
+                        if not rest:
+                            continue
+                        head, _, tail = rest.partition("/")
+                        if tail:
+                            subdirs.add(head)
+                        elif head and "/" not in head and "\\" not in head:
+                            files.append({"filename": head, "size": len(data), "modified": 100.0})
+                    self._send_json(
+                        {
+                            "result": {
+                                "dirs": [{"dirname": name} for name in sorted(subdirs)],
+                                "files": files,
+                                "root_info": {},
+                            }
+                        }
+                    )
                     return
                 if path == "/server/files/list":
                     files = [
@@ -147,18 +178,54 @@ class FilesTests(unittest.TestCase):
         server = self.start_server()
         printer = server.printer()
         src = make_gcode(self.tmp.name)
-        used = ff.upload_to_farm(printer, src, "N7.gcode", "folder")
+        used = ff.upload_to_farm(printer, src, "N7.gcode", "folder", 0.4)
         self.assertEqual(used, "folder")
-        self.assertIn("FARM/N7.gcode", server.store)
+        self.assertIn("FARM/0.4/N7.gcode", server.store)
         items = ff.list_farm(printer, "folder")
-        self.assertEqual([(i["name"], i["size"]) for i in items], [("N7.gcode", 4)])
+        self.assertEqual([(i["name"], i.get("path"), i["size"]) for i in items], [("N7.gcode", "FARM/0.4/N7.gcode", 4)])
         self.assertIn("modified", items[0])
-        deleted = ff.delete_from_farm(printer, ["N7.gcode"], "folder")
+        deleted = ff.delete_from_farm(printer, ["FARM/0.4/N7.gcode"], "folder")
         self.assertEqual(deleted, ["N7.gcode"])
         self.assertEqual(server.store, {})
         self.assertIn(("POST", "/server/files/upload", ""), server.requests)
         self.assertIn(("GET", "/server/files/directory", "path=gcodes/FARM"), server.requests)
-        self.assertIn(("DELETE", "/server/files/gcodes/FARM/N7.gcode", ""), server.requests)
+        self.assertIn(("DELETE", "/server/files/gcodes/FARM/0.4/N7.gcode", ""), server.requests)
+
+    def test_folder_recursive_listing(self):
+        import farm_files as ff
+        server = self.start_server()
+        server.store = {
+            "FARM/N9.gcode": b"root",
+            "FARM/0.4/N1.gcode": b"a",
+            "FARM/0.8/N2.gcode": b"bb",
+        }
+        printer = server.printer()
+        items = ff.list_farm(printer, "folder")
+        by_name = {item["name"]: item.get("path") for item in items}
+        self.assertEqual(
+            by_name,
+            {"N9.gcode": "FARM/N9.gcode", "N1.gcode": "FARM/0.4/N1.gcode", "N2.gcode": "FARM/0.8/N2.gcode"},
+        )
+
+    def test_detect_nozzle(self):
+        import farm_files as ff
+        src = Path(self.tmp.name) / "nz.gcode"
+        src.write_bytes(b"; header\n; nozzle_diameter = 0.8\nG1 X0\n")
+        self.assertEqual(ff.detect_nozzle(src), 0.8)
+        plain = Path(self.tmp.name) / "plain.gcode"
+        plain.write_bytes(b"G1 X0\n")
+        self.assertIsNone(ff.detect_nozzle(plain))
+        self.assertIsNone(ff.detect_nozzle(Path(self.tmp.name) / "missing.gcode"))
+
+    def test_folder_upload_uses_nozzle_path(self):
+        import farm_files as ff
+        server = self.start_server()
+        printer = server.printer()
+        src = make_gcode(self.tmp.name)
+        self.assertEqual(ff.upload_to_farm(printer, src, "N7.gcode", "folder", 0.8), "folder")
+        self.assertIn("FARM/0.8/N7.gcode", server.store)
+        self.assertEqual(ff.upload_to_farm(printer, src, "N8.gcode", "folder"), "folder")
+        self.assertIn("FARM/0.4/N8.gcode", server.store)
 
     def test_prefix_cycle(self):
         import farm_files as ff
@@ -173,12 +240,15 @@ class FilesTests(unittest.TestCase):
         deleted = ff.delete_from_farm(printer, ["N7.gcode"], "prefix")
         self.assertEqual(deleted, ["N7.gcode"])
 
-    def test_folder_fallback_to_prefix_on_400(self):
+    def test_folder_broken_raises_without_prefix_fallback(self):
         import farm_files as ff
         server = self.start_server(folder_broken=True)
         printer = server.printer()
         src = make_gcode(self.tmp.name)
-        used = ff.upload_to_farm(printer, src, "N7.gcode", "folder")
+        with self.assertRaises(ff.FarmFileError):
+            ff.upload_to_farm(printer, src, "N7.gcode", "folder", 0.4)
+        self.assertEqual(server.store, {})
+        used = ff.upload_to_farm(printer, src, "N7.gcode", "prefix")
         self.assertEqual(used, "prefix")
         self.assertIn("FARM_N7.gcode", server.store)
         items = ff.list_farm(printer, "prefix")

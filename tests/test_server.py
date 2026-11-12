@@ -1719,7 +1719,7 @@ class FileApiTests(unittest.TestCase):
         by_printer = {row["printer"]: row for row in response.json()["results"]}
         self.assertTrue(by_printer[self.key_a]["ok"])
         self.assertFalse(by_printer[self.key_b]["ok"])
-        self.assertIn("FARM/N7.gcode", self.moon_a.store)
+        self.assertIn("FARM/0.4/N7.gcode", self.moon_a.store)
 
     def test_upload_mode_persisted_on_fallback(self):
         self.moon_a.folder_broken = True
@@ -1730,9 +1730,9 @@ class FileApiTests(unittest.TestCase):
             timeout=5,
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["results"][0]["ok"])
-        self.assertEqual(self.history.printer_mode(self.key_a), "prefix")
-        self.assertIn("FARM_N9.gcode", self.moon_a.store)
+        self.assertFalse(response.json()["results"][0]["ok"])
+        self.assertEqual(self.history.printer_mode(self.key_a), "folder")
+        self.assertEqual(self.moon_a.store, {})
 
     def test_upload_rejects_bad_body(self):
         response = requests.post(

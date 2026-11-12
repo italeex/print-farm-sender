@@ -79,15 +79,32 @@ class FakeMoonraker:
                 path = self._record()
                 query = parse_qs(raw.query)
                 if path == "/server/files/directory":
-                    if fake.folder_broken or query.get("path", [""])[0] != "gcodes/FARM":
+                    requested = query.get("path", [""])[0]
+                    if (
+                        fake.folder_broken
+                        or not requested
+                        or requested != "gcodes/FARM"
+                        and not requested.startswith("gcodes/FARM/")
+                    ):
                         self._send_json({"error": {"message": "Directory does not exist"}}, status=400)
                         return
-                    files = [
-                        {"filename": key.split("/", 1)[1], "size": len(data), "modified": 100.0}
-                        for key, data in fake.store.items()
-                        if key.startswith("FARM/")
-                    ]
-                    self._send_json({"result": {"dirs": [], "files": files, "root_info": {}}})
+                    prefix = requested[len("gcodes/"):]
+                    base = prefix + "/"
+                    files = []
+                    subdirs = set()
+                    for key, data in fake.store.items():
+                        if not key.startswith(base):
+                            continue
+                        rest = key[len(base):]
+                        if not rest:
+                            continue
+                        head, _, tail = rest.partition("/")
+                        if tail:
+                            subdirs.add(head)
+                        elif head:
+                            files.append({"filename": head, "size": len(data), "modified": 100.0})
+                    dirs = [{"dirname": name} for name in sorted(subdirs)]
+                    self._send_json({"result": {"dirs": dirs, "files": files, "root_info": {}}})
                     return
                 if path == "/server/files/list":
                     files = [

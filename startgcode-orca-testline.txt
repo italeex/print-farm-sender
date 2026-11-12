@@ -1,0 +1,28 @@
+; HEADER_BLOCK_START
+; OrcaSlicer start gcode with Creality-style small centered test line
+; HEADER_BLOCK_END
+M140 S0
+M104 S0
+START_PRINT EXTRUDER_TEMP=[nozzle_temperature_initial_layer] BED_TEMP=[bed_temperature_initial_layer_single]
+T[initial_no_support_extruder]
+M109 S[nozzle_temperature_initial_layer]
+M204 S2000
+G1 Z3 F600
+M83
+
+; TEST LINE
+G1 X150 Y0 F30000
+G1 E1 F300
+G1 Z0.3 F1200
+G1 X175 E9 F1800
+G1 X180 E0.3742 F1200
+G1 X185 E0.3742 F1800
+G1 X190 E0.3742 F1200
+G1 X195 E0.3742 F1800
+G1 X200 E0.3742 F1200
+G91
+G1 X1 Z-0.3 F1200
+G1 X4 F1200
+G92 E0
+G90
+G1 Z1 F600

@@ -11,8 +11,10 @@ FARM_DIR = "FARM"
 FARM_PREFIX = "FARM_"
 TIMEOUT = 10
 UPLOAD_TIMEOUT = 600
+NOZZLE_SCAN_BYTES = 2 * 1024 * 1024
 
 NAME_PATTERN = re.compile(r"^N\d+\.gcode$")
+NOZZLE_PATTERN = re.compile(r"nozzle[_ ]?diam(?:eter)?\s*[:=]\s*(0\.\d+)", re.IGNORECASE)
 
 
 class FarmFileError(Exception):
@@ -25,6 +27,16 @@ def remote_name(number: int) -> str:
     return f"N{int(number)}.gcode"
 
 
+def format_nozzle(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise FarmFileError(f"Некорректное сопло: {value}")
+    if not 0.1 <= number <= 1.2:
+        raise FarmFileError(f"Некорректное сопло: {value}")
+    return f"{number:.1f}"
+
+
 def physical_name(name: str, mode: str) -> str:
     if mode == "folder":
         return name
@@ -33,9 +45,37 @@ def physical_name(name: str, mode: str) -> str:
     raise FarmFileError(f"Неизвестный режим: {mode}")
 
 
+def detect_nozzle(path) -> float | None:
+    try:
+        with open(path, "rb") as handle:
+            chunk = handle.read(NOZZLE_SCAN_BYTES)
+    except OSError:
+        return None
+    try:
+        text = chunk.decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+    match = NOZZLE_PATTERN.search(text)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
 def _check_name(name: str) -> None:
     if "/" in name or "\\" in name or ".." in name or not NAME_PATTERN.match(name):
         raise FarmFileError(f"Некорректное имя файла: {name}")
+
+
+def _check_path(path: str) -> str:
+    text = str(path or "").replace("\\", "/").strip()
+    if not text.startswith(FARM_DIR + "/") or ".." in text.split("/"):
+        raise FarmFileError(f"Некорректный путь файла: {path}")
+    base = text.split("/")[-1]
+    _check_name(base)
+    return text
 
 
 @contextmanager
@@ -55,28 +95,30 @@ def _get(client, url: str):
         raise FarmFileError(f"Не удалось получить список файлов: {exc}") from exc
 
 
+def _directory_entries(client, printer, rel: str) -> tuple[list[dict], list[str]] | None:
+    response = _get(client, f"{printer.base_url}/server/files/directory?path=gcodes/{quote(rel, safe='/')}")
+    if response.status_code in (400, 404):
+        return None
+    if response.status_code >= 400:
+        raise FarmFileError(
+            f"Не удалось получить список файлов: HTTP {response.status_code}",
+            status=response.status_code,
+        )
+    try:
+        result = response.json()["result"]
+        files = result.get("files", [])
+        dirs = result.get("dirs", [])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise FarmFileError(f"Некорректный ответ списка файлов: {exc}") from exc
+    return files, [str(d.get("dirname") or d.get("name") or d.get("path") or "") for d in dirs if isinstance(d, dict)]
+
+
 def list_farm(printer, mode: str, session=None) -> list[dict]:
     if mode not in ("folder", "prefix"):
         raise FarmFileError(f"Неизвестный режим: {mode}")
     with _client(session) as client:
         if mode == "folder":
-            response = _get(client, f"{printer.base_url}/server/files/directory?path=gcodes/{FARM_DIR}")
-            if response.status_code in (400, 404):
-                return []
-            if response.status_code >= 400:
-                raise FarmFileError(
-                    f"Не удалось получить список файлов: HTTP {response.status_code}",
-                    status=response.status_code,
-                )
-            try:
-                files = response.json()["result"]["files"]
-            except (ValueError, KeyError, TypeError) as exc:
-                raise FarmFileError(f"Некорректный ответ списка файлов: {exc}") from exc
-            return [
-                {"name": entry["filename"], "size": entry.get("size", 0), "modified": entry.get("modified", 0.0)}
-                for entry in files
-                if isinstance(entry, dict) and "filename" in entry
-            ]
+            return _list_folder_recursive(client, printer)
         response = _get(client, f"{printer.base_url}/server/files/list?root=gcodes")
         if response.status_code >= 400:
             raise FarmFileError(
@@ -98,15 +140,60 @@ def list_farm(printer, mode: str, session=None) -> list[dict]:
         return items
 
 
-def _post_upload(client, printer, file_path: Path, remote: str, folder: bool):
+def _list_folder_recursive(client, printer) -> list[dict]:
+    first = _directory_entries(client, printer, FARM_DIR)
+    if first is None:
+        return []
+    items: list[dict] = []
+    queue = [FARM_DIR]
+    seen = {FARM_DIR}
+    pending = {FARM_DIR: first}
+    while queue:
+        rel = queue.pop(0)
+        pair = pending.pop(rel, None)
+        if pair is None:
+            pair = _directory_entries(client, printer, rel)
+            if pair is None:
+                continue
+        files, dirs = pair
+        for entry in files:
+            if not isinstance(entry, dict) or "filename" not in entry:
+                continue
+            filename = str(entry["filename"])
+            if "/" in filename or "\\" in filename or not filename:
+                continue
+            if rel == FARM_DIR:
+                relpath = f"{FARM_DIR}/{filename}"
+            else:
+                relpath = f"{rel}/{filename}"
+            items.append(
+                {
+                    "name": filename,
+                    "path": relpath,
+                    "size": entry.get("size", 0),
+                    "modified": entry.get("modified", 0.0),
+                }
+            )
+        for dirname in dirs:
+            if not dirname or "/" in dirname or "\\" in dirname or dirname in (".", ".."):
+                continue
+            child = f"{rel}/{dirname}"
+            if child in seen:
+                continue
+            seen.add(child)
+            queue.append(child)
+    return items
+
+
+def _post_upload(client, printer, file_path: Path, remote: str, folder: str | None):
     try:
         handle = open(file_path, "rb")
     except OSError as exc:
         raise FarmFileError(f"Файл недоступен: {exc}") from exc
     with handle:
         data = {"root": "gcodes"}
-        if folder:
-            data["path"] = FARM_DIR
+        if folder is not None:
+            data["path"] = folder
         try:
             return client.post(
                 f"{printer.base_url}/server/files/upload",
@@ -118,48 +205,75 @@ def _post_upload(client, printer, file_path: Path, remote: str, folder: bool):
             raise FarmFileError(f"Не удалось загрузить файл {remote}: {exc}") from exc
 
 
-def upload_to_farm(printer, file_path, name: str, mode: str, session=None) -> str:
+def upload_to_farm(printer, file_path, name: str, mode: str, nozzle=None, session=None) -> str:
     if mode not in ("folder", "prefix"):
         raise FarmFileError(f"Неизвестный режим: {mode}")
     _check_name(name)
-    tried = [mode] if mode == "prefix" else ["folder", "prefix"]
     with _client(session) as client:
-        for attempt in tried:
-            response = _post_upload(client, printer, Path(file_path), physical_name(name, attempt), attempt == "folder")
+        if mode == "prefix":
+            response = _post_upload(client, printer, Path(file_path), physical_name(name, mode), None)
             if response.status_code == 201:
-                return attempt
-            if attempt == "folder" and response.status_code in (400, 404):
-                continue
+                return "prefix"
             raise FarmFileError(
                 f"Не удалось загрузить файл {name}: HTTP {response.status_code}",
                 status=response.status_code,
             )
+        folder = f"{FARM_DIR}/{format_nozzle(nozzle if nozzle is not None else 0.4)}"
+        response = _post_upload(client, printer, Path(file_path), name, folder)
+        if response.status_code == 201:
+            return "folder"
+        raise FarmFileError(
+            f"Не удалось загрузить файл {name}: HTTP {response.status_code}",
+            status=response.status_code,
+        )
     raise FarmFileError(f"Не удалось загрузить файл {name}: папка недоступна")
 
 
 def delete_from_farm(printer, names, mode: str, session=None) -> list[str]:
     if mode not in ("folder", "prefix"):
         raise FarmFileError(f"Неизвестный режим: {mode}")
-    clean = list(names)
-    for name in clean:
-        _check_name(name)
+    if isinstance(names, str):
+        clean = [names]
+    else:
+        clean = list(names)
+    targets: list[str] = []
+    for item in clean:
+        text = str(item or "")
+        if "/" in text or "\\" in text:
+            targets.append(_check_path(text))
+        elif mode == "prefix" and text.startswith(FARM_PREFIX):
+            _check_name(text[len(FARM_PREFIX):])
+            targets.append(text)
+        else:
+            _check_name(text)
+            if mode == "folder":
+                targets.append(f"{FARM_DIR}/{text}")
+            else:
+                targets.append(physical_name(text, mode))
+    for target in targets:
+        if mode == "folder" and not target.startswith(FARM_DIR + "/"):
+            raise FarmFileError(f"Некорректный путь файла: {target}")
+        if mode == "prefix" and not target.startswith(FARM_PREFIX):
+            raise FarmFileError(f"Некорректный путь файла: {target}")
     deleted = []
     with _client(session) as client:
-        for name in clean:
-            remote = f"{FARM_DIR}/{name}" if mode == "folder" else physical_name(name, mode)
+        for target in targets:
             try:
                 response = client.delete(
-                    f"{printer.base_url}/server/files/gcodes/{quote(remote)}",
+                    f"{printer.base_url}/server/files/gcodes/{quote(target)}",
                     timeout=TIMEOUT,
                 )
             except requests.RequestException as exc:
-                raise FarmFileError(f"Не удалось удалить файл {name}: {exc}") from exc
+                raise FarmFileError(f"Не удалось удалить файл {target}: {exc}") from exc
             if response.status_code == 404:
                 continue
             if response.status_code >= 400:
                 raise FarmFileError(
-                    f"Не удалось удалить файл {name}: HTTP {response.status_code}",
+                    f"Не удалось удалить файл {target}: HTTP {response.status_code}",
                     status=response.status_code,
                 )
-            deleted.append(name)
+            if mode == "prefix" and target.startswith(FARM_PREFIX):
+                deleted.append(target[len(FARM_PREFIX):])
+            else:
+                deleted.append(target.split("/")[-1])
     return deleted

@@ -1,0 +1,231 @@
+12:56:38 START retry
+12:56:39 F008 175 FAIL N12.gcode Не удалось загрузить файл N12.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:39 F008 175 FAIL N13.gcode Не удалось загрузить файл N13.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:39 F008 175 FAIL N14.gcode Не удалось загрузить файл N14.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:39 F008 175 FAIL N15.gcode Не удалось загрузить файл N15.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:39 F008 175 FAIL N16.gcode Не удалось загрузить файл N16.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:39 F008 175 FAIL N18.gcode Не удалось загрузить файл N18.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:40 F008 175 FAIL N19.gcode Не удалось загрузить файл N19.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:40 F008 175 FAIL N20.gcode Не удалось загрузить файл N20.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:40 F008 175 FAIL N21.gcode Не удалось загрузить файл N21.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:40 F008 175 FAIL N22.gcode Не удалось загрузить файл N22.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:40 F008 175 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:40 F008 158 LIST FAIL Не удалось получить список файлов: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:42 F008 158 FAIL N1.gcode Не удалось загрузить файл N1.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:45 F008 158 FAIL N2.gcode Не удалось загрузить файл N2.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:47 F008 158 FAIL N3.gcode Не удалось загрузить файл N3.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:49 F008 158 FAIL N4.gcode Не удалось загрузить файл N4.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:51 F008 158 FAIL N5.gcode Не удалось загрузить файл N5.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:53 F008 158 FAIL N6.gcode Не удалось загрузить файл N6.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:55 F008 158 FAIL N7.gcode Не удалось загрузить файл N7.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:56:57 F008 158 FAIL N8.gcode Не удалось загрузить файл N8.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+12:57:07 F008 103 OK N7.gcode 62196128
+12:57:25 F008 103 OK N9.gcode 45257873
+12:57:28 F008 158 OK N9.gcode 45257873
+12:57:37 F008 155 OK N12.gcode 153536001
+12:57:40 F008 158 OK N10.gcode 30032733
+12:57:44 F008 103 OK N11.gcode 47178824
+12:57:57 F008 158 OK N11.gcode 47178824
+12:58:02 F008 155 OK N13.gcode 73114106
+12:58:46 F008 158 OK N12.gcode 153536001
+12:58:46 F008 103 OK N12.gcode 153536001
+12:58:51 F008 155 OK N14.gcode 99197138
+12:59:10 F008 158 OK N13.gcode 73114106
+12:59:13 F008 103 OK N13.gcode 73114106
+12:59:49 F008 158 OK N14.gcode 99197138
+12:59:52 F008 103 OK N14.gcode 99197138
+13:00:13 F008 155 OK N15.gcode 209854687
+13:00:56 F008 155 OK N16.gcode 109259949
+13:00:58 F008 158 OK N15.gcode 209854687
+13:01:10 F008 103 OK N15.gcode 209854687
+13:01:16 F008 155 OK N18.gcode 47712862
+13:01:34 F008 158 OK N16.gcode 109259949
+13:01:49 F008 103 OK N16.gcode 109259949
+13:01:50 F008 158 OK N18.gcode 47712862
+13:01:55 F008 155 OK N19.gcode 108614022
+13:02:12 F008 103 OK N18.gcode 47712862
+13:02:26 F008 158 OK N19.gcode 108614022
+13:02:36 F008 155 OK N20.gcode 109224100
+13:02:49 F008 103 OK N19.gcode 108614022
+13:03:02 F008 158 OK N20.gcode 109224100
+13:03:09 F008 155 OK N21.gcode 90852080
+13:03:23 F008 155 OK N22.gcode 37198171
+13:03:28 F008 103 OK N20.gcode 109224100
+13:03:33 F008 158 OK N21.gcode 90852080
+13:03:35 F008 155 OK N23.gcode 27529837
+13:03:36 F008 170 FAIL N12.gcode Не удалось загрузить файл N12.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:36 F008 170 FAIL N13.gcode Не удалось загрузить файл N13.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:36 F008 170 FAIL N14.gcode Не удалось загрузить файл N14.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N15.gcode Не удалось загрузить файл N15.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N16.gcode Не удалось загрузить файл N16.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N18.gcode Не удалось загрузить файл N18.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N19.gcode Не удалось загрузить файл N19.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N20.gcode Не удалось загрузить файл N20.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N21.gcode Не удалось загрузить файл N21.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N22.gcode Не удалось загрузить файл N22.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:37 F008 170 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:38 F008 172 FAIL N12.gcode Не удалось загрузить файл N12.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:38 F008 172 FAIL N13.gcode Не удалось загрузить файл N13.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:38 F008 172 FAIL N14.gcode Не удалось загрузить файл N14.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N15.gcode Не удалось загрузить файл N15.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N16.gcode Не удалось загрузить файл N16.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N18.gcode Не удалось загрузить файл N18.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N19.gcode Не удалось загрузить файл N19.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N20.gcode Не удалось загрузить файл N20.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N21.gcode Не удалось загрузить файл N21.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N22.gcode Не удалось загрузить файл N22.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:39 F008 172 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:40 F008 176 FAIL N12.gcode Не удалось загрузить файл N12.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:40 F008 176 FAIL N13.gcode Не удалось загрузить файл N13.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:40 F008 176 FAIL N14.gcode Не удалось загрузить файл N14.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:40 F008 176 FAIL N15.gcode Не удалось загрузить файл N15.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:40 F008 176 FAIL N16.gcode Не удалось загрузить файл N16.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:40 F008 176 FAIL N18.gcode Не удалось загрузить файл N18.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:41 F008 176 FAIL N19.gcode Не удалось загрузить файл N19.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:41 F008 176 FAIL N20.gcode Не удалось загрузить файл N20.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:41 F008 176 FAIL N21.gcode Не удалось загрузить файл N21.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:41 F008 176 FAIL N22.gcode Не удалось загрузить файл N22.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:41 F008 176 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:03:48 F008 158 OK N22.gcode 37198171
+13:03:54 F008 186 OK N8.gcode 25423338
+13:03:58 F008 158 OK N23.gcode 27529837
+13:03:58 F008 158 DONE ok=14 skip=0 fail=8
+13:03:58 F008 155 DONE ok=11 skip=11 fail=0
+13:03:58 F008 175 DONE ok=0 skip=11 fail=11
+13:04:02 F008 103 OK N21.gcode 90852080
+13:04:18 F008 186 OK N9.gcode 45257873
+13:04:26 F008 103 OK N22.gcode 37198171
+13:04:33 F008 186 OK N10.gcode 30032733
+13:04:37 F008 103 OK N23.gcode 27529837
+13:04:37 F008 103 DONE ok=14 skip=8 fail=0
+13:04:37 F008 100 DONE ok=0 skip=22 fail=0
+13:04:37 F008 150 DONE ok=0 skip=22 fail=0
+13:04:37 F008 170 DONE ok=0 skip=11 fail=11
+13:04:37 F008 244 DONE ok=0 skip=22 fail=0
+13:04:37 F008 239 DONE ok=0 skip=22 fail=0
+13:04:37 F008 172 DONE ok=0 skip=11 fail=11
+13:04:37 F008 168 DONE ok=0 skip=22 fail=0
+13:04:37 F008 176 DONE ok=0 skip=11 fail=11
+13:04:54 F008 186 OK N11.gcode 47178824
+13:05:55 F008 186 OK N12.gcode 153536001
+13:06:26 F008 186 OK N13.gcode 73114106
+13:07:12 F008 186 OK N14.gcode 99197138
+13:08:44 F008 186 OK N15.gcode 209854687
+13:09:32 F008 186 OK N16.gcode 109259949
+13:09:54 F008 186 OK N18.gcode 47712862
+13:10:41 F008 186 OK N19.gcode 108614022
+13:11:32 F008 186 OK N20.gcode 109224100
+13:12:12 F008 186 OK N21.gcode 90852080
+13:12:31 F008 186 OK N22.gcode 37198171
+13:12:45 F008 186 OK N23.gcode 27529837
+13:12:45 F008 186 DONE ok=15 skip=7 fail=0
+13:12:45 FINISH retry
+13:46:56 START retry
+13:46:56 F008 158 DONE ok=0 skip=22 fail=0
+13:46:56 F008 155 DONE ok=0 skip=22 fail=0
+13:46:57 F008 172 FAIL N12.gcode Не удалось загрузить файл N12.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:57 F008 172 FAIL N13.gcode Не удалось загрузить файл N13.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:57 F008 172 FAIL N14.gcode Не удалось загрузить файл N14.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N15.gcode Не удалось загрузить файл N15.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N16.gcode Не удалось загрузить файл N16.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N18.gcode Не удалось загрузить файл N18.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N19.gcode Не удалось загрузить файл N19.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N20.gcode Не удалось загрузить файл N20.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N21.gcode Не удалось загрузить файл N21.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N22.gcode Не удалось загрузить файл N22.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:58 F008 172 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:59 F008 176 FAIL N12.gcode Не удалось загрузить файл N12.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:59 F008 176 FAIL N13.gcode Не удалось загрузить файл N13.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:59 F008 176 FAIL N14.gcode Не удалось загрузить файл N14.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:46:59 F008 176 FAIL N15.gcode Не удалось загрузить файл N15.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N16.gcode Не удалось загрузить файл N16.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N18.gcode Не удалось загрузить файл N18.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N19.gcode Не удалось загрузить файл N19.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N20.gcode Не удалось загрузить файл N20.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N21.gcode Не удалось загрузить файл N21.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N22.gcode Не удалось загрузить файл N22.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:00 F008 176 FAIL N23.gcode Не удалось загрузить файл N23.gcode: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:47:07 F008 175 OK N1.gcode 21622168
+13:47:43 F008 170 OK N12.gcode 153536001
+13:48:02 F008 175 OK N12.gcode 153536001
+13:48:08 F008 170 OK N13.gcode 73114106
+13:48:30 F008 175 OK N13.gcode 73114106
+13:48:45 F008 170 OK N14.gcode 99197138
+13:49:09 F008 175 OK N14.gcode 99197138
+13:50:06 F008 170 OK N15.gcode 209854687
+13:50:35 F008 175 OK N15.gcode 209854687
+13:50:44 F008 170 OK N16.gcode 109259949
+13:51:03 F008 170 OK N18.gcode 47712862
+13:51:20 F008 175 OK N16.gcode 109259949
+13:51:39 F008 170 OK N19.gcode 108614022
+13:51:40 F008 175 OK N18.gcode 47712862
+13:52:16 F008 170 OK N20.gcode 109224100
+13:52:26 F008 175 OK N19.gcode 108614022
+13:52:45 F008 170 OK N21.gcode 90852080
+13:52:59 F008 170 OK N22.gcode 37198171
+13:53:10 F008 170 OK N23.gcode 27529837
+13:53:10 F008 175 OK N20.gcode 109224100
+13:53:45 F008 175 OK N21.gcode 90852080
+13:54:03 F008 175 OK N22.gcode 37198171
+13:54:16 F008 175 OK N23.gcode 27529837
+13:54:16 F008 175 DONE ok=12 skip=10 fail=0
+13:54:16 F008 103 DONE ok=0 skip=22 fail=0
+13:54:16 F008 100 DONE ok=0 skip=22 fail=0
+13:54:16 F008 150 DONE ok=0 skip=22 fail=0
+13:54:16 F008 170 DONE ok=11 skip=11 fail=0
+13:54:16 F008 244 DONE ok=0 skip=22 fail=0
+13:54:16 F008 239 DONE ok=0 skip=22 fail=0
+13:54:16 F008 172 DONE ok=0 skip=11 fail=11
+13:54:16 F008 168 DONE ok=0 skip=22 fail=0
+13:54:16 F008 176 DONE ok=0 skip=11 fail=11
+13:54:16 F008 186 DONE ok=0 skip=22 fail=0
+13:54:16 FINISH retry
+13:58:17 START retry
+13:58:17 F008 158 DONE ok=0 skip=22 fail=0
+13:58:17 F008 155 DONE ok=0 skip=22 fail=0
+13:58:17 F008 175 DONE ok=0 skip=22 fail=0
+13:58:17 F008 103 DONE ok=0 skip=22 fail=0
+13:58:17 F008 100 DONE ok=0 skip=22 fail=0
+13:58:17 F008 150 DONE ok=0 skip=22 fail=0
+13:58:18 F008 170 DONE ok=0 skip=22 fail=0
+13:58:18 F008 244 DONE ok=0 skip=22 fail=0
+13:58:18 F008 239 DONE ok=0 skip=22 fail=0
+13:58:20 F008 172 LIST FAIL Не удалось получить список файлов: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:58:42 F008 172 OK N1.gcode 21622168
+13:58:58 F008 172 OK N2.gcode 31577283
+13:59:07 F008 176 OK N12.gcode 153536001
+13:59:20 F008 172 OK N3.gcode 48273683
+13:59:31 F008 176 OK N13.gcode 73114106
+13:59:38 F008 172 OK N4.gcode 52834901
+13:59:53 F008 172 OK N5.gcode 41277928
+14:00:03 F008 176 OK N14.gcode 99197138
+14:00:09 F008 172 OK N6.gcode 45340074
+14:00:30 F008 172 OK N7.gcode 62196128
+14:00:40 F008 172 OK N8.gcode 25423338
+14:00:57 F008 172 OK N9.gcode 45257873
+14:01:08 F008 172 OK N10.gcode 30032733
+14:01:09 F008 176 OK N15.gcode 209854687
+14:01:26 F008 172 OK N11.gcode 47178824
+14:01:47 F008 176 OK N16.gcode 109259949
+14:02:04 F008 176 OK N18.gcode 47712862
+14:02:14 F008 172 OK N12.gcode 153536001
+14:02:39 F008 172 OK N13.gcode 73114106
+14:02:40 F008 176 OK N19.gcode 108614022
+14:03:14 F008 172 OK N14.gcode 99197138
+14:03:17 F008 176 OK N20.gcode 109224100
+14:03:48 F008 176 OK N21.gcode 90852080
+14:04:02 F008 176 OK N22.gcode 37198171
+14:04:13 F008 176 OK N23.gcode 27529837
+14:04:26 F008 172 OK N15.gcode 209854687
+14:05:05 F008 172 OK N16.gcode 109259949
+14:05:24 F008 172 OK N18.gcode 47712862
+14:06:04 F008 172 OK N19.gcode 108614022
+14:06:44 F008 172 OK N20.gcode 109224100
+14:07:17 F008 172 OK N21.gcode 90852080
+14:07:32 F008 172 OK N22.gcode 37198171
+14:07:45 F008 172 OK N23.gcode 27529837
+14:07:45 F008 172 DONE ok=22 skip=0 fail=0
+14:07:45 F008 168 DONE ok=0 skip=22 fail=0
+14:07:45 F008 176 DONE ok=11 skip=11 fail=0
+14:07:45 F008 186 DONE ok=0 skip=22 fail=0
+14:07:45 FINISH retry
