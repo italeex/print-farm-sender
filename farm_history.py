@@ -1133,7 +1133,7 @@ class HistoryStore:
                     if detected is not None:
                         final_nozzle, known = float(detected), 1
                     elif parsed_nozzle is not None:
-                        final_nozzle, known = float(parsed_nozzle), current_known
+                        final_nozzle, known = float(parsed_nozzle), 0
                     elif file_path is not None:
                         final_nozzle, known = current_nozzle, 0
                     else:

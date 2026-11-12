@@ -46,6 +46,13 @@ def physical_name(name: str, mode: str) -> str:
 
 
 def detect_nozzle(path) -> float | None:
+    name = Path(path).name
+    match = re.search(r"-(\d+\.\d+)\.gcode$", name, re.IGNORECASE)
+    if match is not None:
+        try:
+            return float(match.group(1))
+        except (TypeError, ValueError):
+            pass
     try:
         with open(path, "rb") as handle:
             chunk = handle.read(NOZZLE_SCAN_BYTES)

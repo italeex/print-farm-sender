@@ -735,12 +735,15 @@ class FarmHandler(BaseHTTPRequestHandler):
         return result
 
     @staticmethod
-    def _is_printing_remote(current: str, remote: str) -> bool:
+    def _part_number(name: str) -> str:
+        base = str(name or "").replace("\\", "/").split("/")[-1]
+        match = re.match(r"N(\d+)", base, re.IGNORECASE)
+        return match.group(1) if match else base
+
+    def _is_printing_remote(self, current: str, remote: str) -> bool:
         if not current or not remote:
             return False
-        base = current.replace("\\", "/").split("/")[-1]
-        want = remote.replace("\\", "/").split("/")[-1]
-        return base == want
+        return self._part_number(current) == self._part_number(remote)
 
     def _catalog_statuses(self) -> dict:
         catalog = self.app.history.catalog_map()
@@ -772,6 +775,12 @@ class FarmHandler(BaseHTTPRequestHandler):
                     continue
                 entry = by_base.get(remote)
                 if entry is None:
+                    want = self._part_number(remote)
+                    for name, candidate in by_base.items():
+                        if self._part_number(name) == want:
+                            entry = candidate
+                            break
+                if entry is None:
                     per[part_key] = "missing"
                     continue
                 ref_size = item.get("file_size")
@@ -783,7 +792,7 @@ class FarmHandler(BaseHTTPRequestHandler):
                     actual = int((entry or {}).get("size") or 0)
                 except (TypeError, ValueError):
                     actual = 0
-                if ref_size is not None and actual != ref_size:
+                if remote in by_base and ref_size is not None and actual != ref_size:
                     per[part_key] = "stale"
                     continue
                 per[part_key] = "ok"
