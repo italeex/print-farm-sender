@@ -955,11 +955,14 @@ class FarmHandler(BaseHTTPRequestHandler):
         now = time.time()
         with FILES_LOCK:
             self.app.history.printer_files(key, used, now)
-            try:
-                from farm_files import format_nozzle as _format_nozzle
-                stored_path = f"{FARM_DIR}/{_format_nozzle(nozzle)}/{remote}"
-            except Exception:
-                stored_path = f"{FARM_DIR}/{remote}"
+            if used == "prefix":
+                stored_path = f"{FARM_PREFIX}{remote}"
+            else:
+                try:
+                    from farm_files import format_nozzle as _format_nozzle
+                    stored_path = f"{FARM_DIR}/{_format_nozzle(nozzle)}/{remote}"
+                except Exception:
+                    stored_path = f"{FARM_DIR}/{remote}"
             self.app.history.file_registry(key, remote, size, modified, now, stored_path)
         return {"printer": key, "part": part, "ok": True}
 
@@ -975,12 +978,14 @@ class FarmHandler(BaseHTTPRequestHandler):
         candidates: list[str] = []
         if stored_path:
             candidates.append(stored_path)
-        folder_guess = f"{FARM_DIR}/{remote}"
-        if folder_guess not in candidates:
-            candidates.append(folder_guess)
-        prefix_guess = f"{FARM_PREFIX}{remote}"
-        if prefix_guess not in candidates:
-            candidates.append(prefix_guess)
+        for guess in (
+            f"{FARM_DIR}/0.4/{remote}",
+            f"{FARM_DIR}/0.8/{remote}",
+            f"{FARM_DIR}/{remote}",
+            f"{FARM_PREFIX}{remote}",
+        ):
+            if guess not in candidates:
+                candidates.append(guess)
         used = None
         last_error = ""
         for candidate in candidates:
@@ -998,10 +1003,11 @@ class FarmHandler(BaseHTTPRequestHandler):
                 break
         now = time.time()
         with FILES_LOCK:
-            current = self.app.history.registry().get(key, {})
-            current.pop(remote, None)
-            self.app.history.set_registry(key, list(current.values()))
-            self.app.history.printer_files(key, used or mode, now)
+            snapshot_mode = used or mode
+        current = self.app.history.registry().get(key, {}) or {}
+        remaining = [entry for name, entry in current.items() if name != remote]
+        self.app.history.set_registry(key, remaining)
+        self.app.history.printer_files(key, snapshot_mode, now)
         if used is None:
             if last_error:
                 return {"printer": key, "part": part, "ok": False, "error": last_error}

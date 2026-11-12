@@ -14,7 +14,7 @@ UPLOAD_TIMEOUT = 600
 NOZZLE_SCAN_BYTES = 2 * 1024 * 1024
 
 NAME_PATTERN = re.compile(r"^N\d+\.gcode$")
-NOZZLE_PATTERN = re.compile(r"nozzle[_ ]?diam(?:eter)?\s*[:=]\s*(0\.\d+)", re.IGNORECASE)
+NOZZLE_PATTERN = re.compile(r"nozzle[_ ]?diam(?:eter)?\s*[:=]\s*(\d+\.\d+)", re.IGNORECASE)
 
 
 class FarmFileError(Exception):
